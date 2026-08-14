@@ -334,15 +334,6 @@ function updateDashboard(data){
 }
 window.updateDashboard = updateDashboard;
 
-// ---- WebSocket bridge to dashboard_bridge.py ----
-function connectWS(url='ws://localhost:8765'){
-  let ws;
-  try { ws = new WebSocket(url); } catch(e){ setTimeout(()=>connectWS(url),1500); return; }
-  ws.onmessage = (ev) => { try { updateDashboard(JSON.parse(ev.data)); } catch(e){ console.error('bad payload', e); } };
-  ws.onclose = () => setTimeout(()=>connectWS(url), 1500);
-  ws.onerror = () => ws.close();
-}
-connectWS();
 
 // ==========================================================================
 // RENDERING — reads only from `state`. No perception logic below this line.
@@ -678,5 +669,6 @@ function drawTraj(){
 }
 drawTraj();
 </script>
+<script src="replay.js"></script>
 </body>
 </html>
