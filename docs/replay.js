@@ -46,7 +46,7 @@
 
     const DATASET_PATH = "data";
 
-    const TARGET_FPS = 20.0;
+    const TARGET_FPS = 10.0;
 
     const PRINT_EVERY = 50;
 
