@@ -63,7 +63,7 @@
      * of look-ahead.
      */
     const PRELOAD_AHEAD =
-        40;
+        20;
 
     /*
      * Number of previous frames to keep.
