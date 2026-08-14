@@ -18,12 +18,13 @@
  * Features:
  *   - CSV replay
  *   - 10 FPS target
- *   - 20-frame image preloading
- *   - in-memory image cache
+ *   - 40-frame look-ahead preload
+ *   - rolling image cache
  *   - automatic looping
  *   - trajectory reset
  *   - replay progress
  *   - logging every 50 frames
+ *   - no external libraries
  * ============================================================
  */
 
@@ -56,11 +57,22 @@
         50;
 
     /*
-     * Number of future frames whose images are
-     * loaded in the background.
+     * Number of future frames to preload.
+     *
+     * 40 frames at 10 FPS = 4 seconds
+     * of look-ahead.
      */
     const PRELOAD_AHEAD =
         40;
+
+    /*
+     * Number of previous frames to keep.
+     *
+     * This prevents the JavaScript cache from
+     * growing indefinitely.
+     */
+    const CACHE_BEHIND =
+        5;
 
 
     // =========================================================
@@ -86,6 +98,9 @@
             this.preloadAhead =
                 PRELOAD_AHEAD;
 
+            this.cacheBehind =
+                CACHE_BEHIND;
+
 
             // -------------------------------------------------
             // Replay state
@@ -93,38 +108,45 @@
 
             this.rows = [];
 
-            this.totalFrames = 0;
+            this.totalFrames =
+                0;
 
-            this.rowIndex = 0;
+            this.rowIndex =
+                0;
 
-            this.frameCount = 0;
+            this.frameCount =
+                0;
 
-            this.running = false;
+            this.running =
+                false;
 
-            this.timer = null;
+            this.timer =
+                null;
 
 
             // -------------------------------------------------
-            // Image cache
+            // Rolling image cache
             //
             // key:
+            //
             //     front/frame_000001
             //
             // value:
-            //     Promise resolving to Base64
             //
-            // Storing the Promise prevents duplicate requests.
+            //     Promise -> Base64 JPEG
+            //
+            // IMPORTANT:
+            // This cache is deliberately bounded.
             // -------------------------------------------------
 
             this.imageCache =
                 new Map();
 
 
-            // -------------------------------------------------
-            // Prevent multiple preload operations from
-            // creating unnecessary duplicate work.
-            // -------------------------------------------------
-
+            /*
+             * Tracks frame indices whose preload
+             * operation has already been scheduled.
+             */
             this.preloadingIndexes =
                 new Set();
         }
@@ -132,12 +154,6 @@
 
         // =====================================================
         // Decode CSV value
-        //
-        // Equivalent to:
-        //
-        //     json.loads(value)
-        //
-        // from Python.
         // =====================================================
 
         decodeCsvValue(value) {
@@ -154,7 +170,9 @@
 
             try {
 
-                return JSON.parse(value);
+                return JSON.parse(
+                    value
+                );
 
             } catch (error) {
 
@@ -166,12 +184,7 @@
         // =====================================================
         // CSV parser
         //
-        // Handles:
-        // - quoted fields
-        // - JSON objects
-        // - JSON arrays
-        // - commas inside quoted JSON
-        // - escaped quotes
+        // Supports quoted JSON containing commas.
         // =====================================================
 
         parseCsv(text) {
@@ -205,10 +218,11 @@
                         character === '"'
                     ) {
 
-                        // CSV escaped quote:
-                        //
-                        // ""
-                        //
+                        /*
+                         * CSV escaped quote:
+                         *
+                         * ""
+                         */
                         if (
                             text[i + 1] === '"'
                         ) {
@@ -248,10 +262,12 @@
                 // -------------------------------------------------
 
                 else if (
-                    character === ','
+                    character === ","
                 ) {
 
-                    row.push(field);
+                    row.push(
+                        field
+                    );
 
                     field = "";
                 }
@@ -261,12 +277,16 @@
                 // -------------------------------------------------
 
                 else if (
-                    character === '\n'
+                    character === "\n"
                 ) {
 
-                    row.push(field);
+                    row.push(
+                        field
+                    );
 
-                    rows.push(row);
+                    rows.push(
+                        row
+                    );
 
                     row = [];
 
@@ -274,11 +294,11 @@
                 }
 
                 // -------------------------------------------------
-                // Ignore CR from Windows CSV
+                // Ignore CR
                 // -------------------------------------------------
 
                 else if (
-                    character !== '\r'
+                    character !== "\r"
                 ) {
 
                     field += character;
@@ -295,9 +315,13 @@
                 row.length > 0
             ) {
 
-                row.push(field);
+                row.push(
+                    field
+                );
 
-                rows.push(row);
+                rows.push(
+                    row
+                );
             }
 
 
@@ -322,22 +346,28 @@
                                 value !== ""
                         )
                 )
-                .map(values => {
+                .map(
+                    values => {
 
-                    const object = {};
-
-
-                    headers.forEach(
-                        (header, index) => {
-
-                            object[header] =
-                                values[index] ?? "";
-                        }
-                    );
+                        const object = {};
 
 
-                    return object;
-                });
+                        headers.forEach(
+                            (
+                                header,
+                                index
+                            ) => {
+
+                                object[header] =
+                                    values[index] ??
+                                    "";
+                            }
+                        );
+
+
+                        return object;
+                    }
+                );
         }
 
 
@@ -351,11 +381,14 @@
 
 
             // -------------------------------------------------
-            // Decode all CSV fields
+            // Decode CSV fields
             // -------------------------------------------------
 
             for (
-                const [key, value]
+                const [
+                    key,
+                    value
+                ]
                 of Object.entries(row)
             ) {
 
@@ -369,7 +402,9 @@
 
 
                 payload[key] =
-                    this.decodeCsvValue(value);
+                    this.decodeCsvValue(
+                        value
+                    );
             }
 
 
@@ -425,7 +460,9 @@
             ) {
 
                 const match =
-                    String(frameId).match(
+                    String(
+                        frameId
+                    ).match(
                         /(\d+)$/
                     );
 
@@ -433,7 +470,9 @@
                 if (match) {
 
                     payload.frame_idx =
-                        Number(match[1]);
+                        Number(
+                            match[1]
+                        );
                 }
             }
 
@@ -457,7 +496,7 @@
 
 
             // -------------------------------------------------
-            // Ensure all four cameras exist
+            // Ensure all cameras exist
             // -------------------------------------------------
 
             for (
@@ -466,7 +505,9 @@
             ) {
 
                 let cameraData =
-                    cameras[cameraName];
+                    cameras[
+                        cameraName
+                    ];
 
 
                 if (
@@ -489,7 +530,9 @@
                 }
 
 
-                cameras[cameraName] =
+                cameras[
+                    cameraName
+                ] =
                     cameraData;
             }
 
@@ -503,21 +546,12 @@
 
 
         // =====================================================
-        // Load one image
+        // Load one JPEG as Base64
         //
-        // IMPORTANT:
+        // The Promise itself is stored in the cache.
         //
-        // The cache stores the Promise immediately.
-        //
-        // Therefore:
-        //
-        // preload(frame_10)
-        //
-        // and
-        //
-        // playback(frame_10)
-        //
-        // share the SAME network request.
+        // This means preload + playback share the same
+        // request instead of downloading the same image twice.
         // =====================================================
 
         async loadImageBase64(
@@ -561,7 +595,7 @@
 
 
             // -------------------------------------------------
-            // Start request
+            // Start network request
             // -------------------------------------------------
 
             const imagePromise =
@@ -603,7 +637,7 @@
 
 
                                 reader.onload =
-                                    function () {
+                                    () => {
 
                                         const result =
                                             reader.result;
@@ -615,27 +649,18 @@
                                             );
 
 
-                                        if (
+                                        resolve(
                                             commaIndex >= 0
-                                        ) {
-
-                                            resolve(
-                                                result.slice(
+                                                ? result.slice(
                                                     commaIndex + 1
                                                 )
-                                            );
-
-                                        } else {
-
-                                            resolve(
-                                                result
-                                            );
-                                        }
+                                                : result
+                                        );
                                     };
 
 
                                 reader.onerror =
-                                    function () {
+                                    () => {
 
                                         reject(
                                             reader.error ||
@@ -655,10 +680,11 @@
                 );
 
 
-            // -------------------------------------------------
-            // Store Promise immediately
-            // -------------------------------------------------
-
+            /*
+             * Store immediately.
+             *
+             * A second caller gets the same Promise.
+             */
             this.imageCache.set(
                 cacheKey,
                 imagePromise
@@ -671,9 +697,10 @@
 
             } catch (error) {
 
-                // Remove failed request so it can
-                // be retried later.
-
+                /*
+                 * Remove failed requests so they
+                 * can be retried.
+                 */
                 this.imageCache.delete(
                     cacheKey
                 );
@@ -684,7 +711,7 @@
 
 
         // =====================================================
-        // Prepare four camera images for one payload
+        // Load all four camera images
         // =====================================================
 
         async prepareImages(
@@ -721,8 +748,8 @@
         // =====================================================
         // Preload future frames
         //
-        // This runs in the background while the replay
-        // continues.
+        // This is background work.
+        // Playback does NOT wait for the entire preload.
         // =====================================================
 
         async preloadFrames(
@@ -755,10 +782,9 @@
                 index++
             ) {
 
-                // ---------------------------------------------
-                // Already scheduled?
-                // ---------------------------------------------
-
+                /*
+                 * Don't schedule the same frame repeatedly.
+                 */
                 if (
                     this.preloadingIndexes.has(
                         index
@@ -778,7 +804,9 @@
 
                     const payload =
                         this.preparePayload(
-                            this.rows[index]
+                            this.rows[
+                                index
+                            ]
                         );
 
 
@@ -787,7 +815,7 @@
 
 
                     // -----------------------------------------
-                    // Load all four cameras
+                    // Four cameras
                     // -----------------------------------------
 
                     for (
@@ -819,24 +847,111 @@
             ) {
 
                 /*
-                 * Do not block playback.
-                 *
-                 * We intentionally do not await this
-                 * from publishFrame().
+                 * Don't await from the replay loop.
                  */
-
                 Promise.allSettled(
                     jobs
-                ).then(
-                    () => {
-
-                        /*
-                         * Preloading completed.
-                         *
-                         * The images now live in imageCache.
-                         */
-                    }
                 );
+            }
+        }
+
+
+        // =====================================================
+        // Rolling cache cleanup
+        //
+        // Keeps:
+        //
+        //   current - 5
+        //   through
+        //   current + 40
+        //
+        // Everything else is removed from our JS cache.
+        // =====================================================
+
+        cleanupCache(
+            currentIndex
+        ) {
+
+            const minIndex =
+                Math.max(
+                    0,
+                    currentIndex -
+                    this.cacheBehind
+                );
+
+
+            const maxIndex =
+                Math.min(
+                    this.totalFrames - 1,
+                    currentIndex +
+                    this.preloadAhead
+                );
+
+
+            // -------------------------------------------------
+            // Remove old image cache entries
+            // -------------------------------------------------
+
+            for (
+                const key
+                of this.imageCache.keys()
+            ) {
+
+                const match =
+                    key.match(
+                        /\/frame_(\d+)$/
+                    );
+
+
+                if (!match) {
+                    continue;
+                }
+
+
+                const frameNumber =
+                    Number(
+                        match[1]
+                    );
+
+
+                /*
+                 * frame_000001 corresponds
+                 * to array index 0.
+                 */
+                const frameIndex =
+                    frameNumber - 1;
+
+
+                if (
+                    frameIndex < minIndex ||
+                    frameIndex > maxIndex
+                ) {
+
+                    this.imageCache.delete(
+                        key
+                    );
+                }
+            }
+
+
+            // -------------------------------------------------
+            // Keep preload bookkeeping bounded too
+            // -------------------------------------------------
+
+            for (
+                const index
+                of this.preloadingIndexes
+            ) {
+
+                if (
+                    index < minIndex ||
+                    index > maxIndex
+                ) {
+
+                    this.preloadingIndexes.delete(
+                        index
+                    );
+                }
             }
         }
 
@@ -922,7 +1037,7 @@
 
 
             // -------------------------------------------------
-            // Current CSV row
+            // Current row
             // -------------------------------------------------
 
             const row =
@@ -942,10 +1057,9 @@
 
 
             // -------------------------------------------------
-            // Load images
+            // Get four images
             //
-            // Usually this is now a cache hit because
-            // preloadFrames() has already loaded them.
+            // Usually cache hits after preloading starts.
             // -------------------------------------------------
 
             payload =
@@ -955,7 +1069,7 @@
 
 
             // -------------------------------------------------
-            // Trajectory reset at first frame
+            // Reset trajectory at beginning of replay
             // -------------------------------------------------
 
             if (
@@ -968,12 +1082,12 @@
 
 
             // -------------------------------------------------
-            // Send to dashboard
+            // Send to existing dashboard
             // -------------------------------------------------
 
             if (
-                typeof window.updateDashboard
-                !== "function"
+                typeof window.updateDashboard !==
+                "function"
             ) {
 
                 throw new Error(
@@ -1018,15 +1132,23 @@
 
 
             // -------------------------------------------------
-            // Move to next frame
+            // Move forward
             // -------------------------------------------------
 
             this.rowIndex++;
 
 
             // -------------------------------------------------
-            // Start background preload
-            // for upcoming frames.
+            // Rolling cache cleanup
+            // -------------------------------------------------
+
+            this.cleanupCache(
+                this.rowIndex
+            );
+
+
+            // -------------------------------------------------
+            // Start next preload window
             // -------------------------------------------------
 
             if (
@@ -1041,7 +1163,7 @@
 
 
             // -------------------------------------------------
-            // End of replay
+            // Replay finished
             // -------------------------------------------------
 
             if (
@@ -1057,10 +1179,9 @@
                 );
 
 
-                // ---------------------------------------------
-                // Start again from frame 1.
-                // ---------------------------------------------
-
+                /*
+                 * Restart.
+                 */
                 this.rowIndex =
                     0;
 
@@ -1069,14 +1190,24 @@
 
 
                 /*
-                 * Do NOT clear imageCache.
-                 *
-                 * This is intentional.
-                 *
-                 * The browser can immediately reuse
-                 * the downloaded images on the next
-                 * iteration.
+                 * Reset the rolling cache around
+                 * the beginning of the dataset.
                  */
+                this.cleanupCache(
+                    0
+                );
+
+
+                /*
+                 * Allow the first frames to be
+                 * preloaded again.
+                 */
+                this.preloadingIndexes.clear();
+
+
+                this.preloadFrames(
+                    0
+                );
             }
         }
 
@@ -1114,21 +1245,29 @@
 
             console.log(
                 "[PerceptionReplay] " +
-                "Preload window: " +
+                "Preload ahead: " +
                 this.preloadAhead +
                 " frames"
             );
 
 
+            console.log(
+                "[PerceptionReplay] " +
+                "Cache behind: " +
+                this.cacheBehind +
+                " frames"
+            );
+
+
             // -------------------------------------------------
-            // Load CSV once
+            // Load CSV
             // -------------------------------------------------
 
             await this.loadCsv();
 
 
             // -------------------------------------------------
-            // Initial replay state
+            // Reset replay state
             // -------------------------------------------------
 
             this.rowIndex =
@@ -1138,8 +1277,13 @@
                 0;
 
 
+            this.imageCache.clear();
+
+            this.preloadingIndexes.clear();
+
+
             // -------------------------------------------------
-            // Tell dashboard total frame count
+            // Inform dashboard
             // -------------------------------------------------
 
             if (
@@ -1159,12 +1303,10 @@
 
 
             // -------------------------------------------------
-            // Start preloading immediately.
+            // Start background preload
             //
-            // We intentionally DO NOT await this.
-            //
-            // Playback starts while the first 20 frames
-            // are being downloaded.
+            // IMPORTANT:
+            // Do not await it.
             // -------------------------------------------------
 
             this.preloadFrames(
@@ -1173,7 +1315,7 @@
 
 
             // -------------------------------------------------
-            // Target frame period
+            // FPS timing
             // -------------------------------------------------
 
             const framePeriod =
@@ -1229,7 +1371,7 @@
 
 
                     // -------------------------------------------------
-                    // Maximum speed mode
+                    // Maximum-speed mode
                     // -------------------------------------------------
 
                     if (
@@ -1247,7 +1389,7 @@
 
 
                     // -------------------------------------------------
-                    // Compensate for processing time
+                    // Maintain target FPS
                     // -------------------------------------------------
 
                     const elapsed =
@@ -1320,7 +1462,7 @@
 
     window.addEventListener(
         "load",
-        function () {
+        () => {
 
             const replay =
                 new PerceptionReplay();
