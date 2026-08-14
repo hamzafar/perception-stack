@@ -1,30 +1,29 @@
 /*
  * replay.js
- * ============================================================
- * Browser-based equivalent of Python PerceptionReplay.
  *
- * Data:
+ * Browser equivalent of the Python PerceptionReplay.
  *
- *   data/perception.csv
- *   data/front/frame_000001.jpg
- *   data/rear/frame_000001.jpg
- *   data/left/frame_000001.jpg
- *   data/right/frame_000001.jpg
+ * Expected structure:
  *
- * Dashboard:
+ * docs/
+ * ├── index.html
+ * ├── replay.js
+ * └── data/
+ *     ├── perception.csv
+ *     ├── front/
+ *     │   ├── frame_000001.jpg
+ *     │   └── ...
+ *     ├── rear/
+ *     ├── left/
+ *     └── right/
  *
- *   window.updateDashboard(payload)
+ * The existing dashboard must provide:
  *
- * Features:
- *   - CSV replay
- *   - 10 FPS target
- *   - 20-frame image preloading
- *   - in-memory image cache
- *   - automatic looping
- *   - trajectory reset
- *   - replay progress
- *   - logging every 50 frames
- * ============================================================
+ *     window.updateDashboard(payload)
+ *
+ * No Python.
+ * No WebSocket.
+ * No external libraries.
  */
 
 (function () {
@@ -43,24 +42,13 @@
         "right"
     ];
 
-    const CSV_PATH =
-        "data/perception.csv";
+    const CSV_PATH = "data/perception.csv";
 
-    const DATASET_PATH =
-        "data";
+    const DATASET_PATH = "data";
 
-    const TARGET_FPS =
-        10.0;
+    const TARGET_FPS = 10.0;
 
-    const PRINT_EVERY =
-        50;
-
-    /*
-     * Number of future frames whose images are
-     * loaded in the background.
-     */
-    const PRELOAD_AHEAD =
-        40;
+    const PRINT_EVERY = 50;
 
 
     // =========================================================
@@ -71,73 +59,31 @@
 
         constructor() {
 
-            this.csvPath =
-                CSV_PATH;
+            this.csvPath = CSV_PATH;
 
-            this.datasetPath =
-                DATASET_PATH;
+            this.datasetPath = DATASET_PATH;
 
-            this.targetFps =
-                TARGET_FPS;
+            this.targetFps = TARGET_FPS;
 
-            this.printEvery =
-                PRINT_EVERY;
+            this.printEvery = PRINT_EVERY;
 
-            this.preloadAhead =
-                PRELOAD_AHEAD;
-
-
-            // -------------------------------------------------
-            // Replay state
-            // -------------------------------------------------
-
-            this.rows = [];
+            this.frameCount = 0;
 
             this.totalFrames = 0;
 
-            this.rowIndex = 0;
+            this.rows = [];
 
-            this.frameCount = 0;
+            this.rowIndex = 0;
 
             this.running = false;
 
             this.timer = null;
-
-
-            // -------------------------------------------------
-            // Image cache
-            //
-            // key:
-            //     front/frame_000001
-            //
-            // value:
-            //     Promise resolving to Base64
-            //
-            // Storing the Promise prevents duplicate requests.
-            // -------------------------------------------------
-
-            this.imageCache =
-                new Map();
-
-
-            // -------------------------------------------------
-            // Prevent multiple preload operations from
-            // creating unnecessary duplicate work.
-            // -------------------------------------------------
-
-            this.preloadingIndexes =
-                new Set();
         }
 
 
         // =====================================================
         // Decode CSV value
-        //
-        // Equivalent to:
-        //
-        //     json.loads(value)
-        //
-        // from Python.
+        // Equivalent to Python json.loads()
         // =====================================================
 
         decodeCsvValue(value) {
@@ -147,10 +93,8 @@
                 value === null ||
                 value === ""
             ) {
-
                 return value;
             }
-
 
             try {
 
@@ -166,12 +110,9 @@
         // =====================================================
         // CSV parser
         //
-        // Handles:
-        // - quoted fields
-        // - JSON objects
-        // - JSON arrays
-        // - commas inside quoted JSON
-        // - escaped quotes
+        // Important:
+        // Your CSV contains JSON fields with commas, therefore
+        // a simple split(",") cannot be used.
         // =====================================================
 
         parseCsv(text) {
@@ -191,24 +132,19 @@
                 i++
             ) {
 
-                const character =
-                    text[i];
+                const character = text[i];
 
 
-                // -------------------------------------------------
-                // Inside quoted field
-                // -------------------------------------------------
+                // ---------------------------------------------
+                // Inside quoted CSV field
+                // ---------------------------------------------
 
                 if (quoted) {
 
-                    if (
-                        character === '"'
-                    ) {
+                    if (character === '"') {
 
                         // CSV escaped quote:
-                        //
                         // ""
-                        //
                         if (
                             text[i + 1] === '"'
                         ) {
@@ -231,9 +167,9 @@
                 }
 
 
-                // -------------------------------------------------
+                // ---------------------------------------------
                 // Start quoted field
-                // -------------------------------------------------
+                // ---------------------------------------------
 
                 if (
                     character === '"'
@@ -243,9 +179,9 @@
 
                 }
 
-                // -------------------------------------------------
+                // ---------------------------------------------
                 // Field separator
-                // -------------------------------------------------
+                // ---------------------------------------------
 
                 else if (
                     character === ','
@@ -256,9 +192,9 @@
                     field = "";
                 }
 
-                // -------------------------------------------------
+                // ---------------------------------------------
                 // End of row
-                // -------------------------------------------------
+                // ---------------------------------------------
 
                 else if (
                     character === '\n'
@@ -273,9 +209,9 @@
                     field = "";
                 }
 
-                // -------------------------------------------------
-                // Ignore CR from Windows CSV
-                // -------------------------------------------------
+                // ---------------------------------------------
+                // Ignore CR
+                // ---------------------------------------------
 
                 else if (
                     character !== '\r'
@@ -286,10 +222,7 @@
             }
 
 
-            // -------------------------------------------------
             // Last row
-            // -------------------------------------------------
-
             if (
                 field.length > 0 ||
                 row.length > 0
@@ -309,8 +242,7 @@
             }
 
 
-            const headers =
-                rows[0];
+            const headers = rows[0];
 
 
             return rows
@@ -343,6 +275,7 @@
 
         // =====================================================
         // Prepare dashboard payload
+        // Equivalent to Python _prepare_payload()
         // =====================================================
 
         preparePayload(row) {
@@ -351,7 +284,7 @@
 
 
             // -------------------------------------------------
-            // Decode all CSV fields
+            // Decode every CSV field
             // -------------------------------------------------
 
             for (
@@ -503,53 +436,24 @@
 
 
         // =====================================================
-        // Load one image
+        // Load image
         //
-        // IMPORTANT:
+        // Python equivalent:
         //
-        // The cache stores the Promise immediately.
+        // open(image, "rb")
+        // base64.b64encode(...)
         //
-        // Therefore:
+        // Browser equivalent:
         //
-        // preload(frame_10)
-        //
-        // and
-        //
-        // playback(frame_10)
-        //
-        // share the SAME network request.
+        // fetch()
+        // Blob
+        // FileReader
         // =====================================================
 
         async loadImageBase64(
             cameraName,
             frameId
         ) {
-
-            const cacheKey =
-                cameraName +
-                "/" +
-                frameId;
-
-
-            // -------------------------------------------------
-            // Cache hit
-            // -------------------------------------------------
-
-            if (
-                this.imageCache.has(
-                    cacheKey
-                )
-            ) {
-
-                return this.imageCache.get(
-                    cacheKey
-                );
-            }
-
-
-            // -------------------------------------------------
-            // Image path
-            // -------------------------------------------------
 
             const imagePath =
                 this.datasetPath +
@@ -560,136 +464,84 @@
                 ".jpg";
 
 
-            // -------------------------------------------------
-            // Start request
-            // -------------------------------------------------
-
-            const imagePromise =
-                fetch(
-                    imagePath,
-                    {
-                        cache:
-                            "force-cache"
-                    }
-                )
-                .then(
-                    response => {
-
-                        if (
-                            !response.ok
-                        ) {
-
-                            throw new Error(
-                                "Image not found: " +
-                                imagePath
-                            );
-                        }
-
-
-                        return response.blob();
-                    }
-                )
-                .then(
-                    blob => {
-
-                        return new Promise(
-                            (
-                                resolve,
-                                reject
-                            ) => {
-
-                                const reader =
-                                    new FileReader();
-
-
-                                reader.onload =
-                                    function () {
-
-                                        const result =
-                                            reader.result;
-
-
-                                        const commaIndex =
-                                            result.indexOf(
-                                                ","
-                                            );
-
-
-                                        if (
-                                            commaIndex >= 0
-                                        ) {
-
-                                            resolve(
-                                                result.slice(
-                                                    commaIndex + 1
-                                                )
-                                            );
-
-                                        } else {
-
-                                            resolve(
-                                                result
-                                            );
-                                        }
-                                    };
-
-
-                                reader.onerror =
-                                    function () {
-
-                                        reject(
-                                            reader.error ||
-                                            new Error(
-                                                "Failed to read image"
-                                            )
-                                        );
-                                    };
-
-
-                                reader.readAsDataURL(
-                                    blob
-                                );
-                            }
-                        );
-                    }
+            const response =
+                await fetch(
+                    imagePath
                 );
 
 
-            // -------------------------------------------------
-            // Store Promise immediately
-            // -------------------------------------------------
+            if (!response.ok) {
 
-            this.imageCache.set(
-                cacheKey,
-                imagePromise
-            );
-
-
-            try {
-
-                return await imagePromise;
-
-            } catch (error) {
-
-                // Remove failed request so it can
-                // be retried later.
-
-                this.imageCache.delete(
-                    cacheKey
+                throw new Error(
+                    "Image not found: " +
+                    imagePath
                 );
-
-                throw error;
             }
+
+
+            const blob =
+                await response.blob();
+
+
+            return new Promise(
+                (resolve, reject) => {
+
+                    const reader =
+                        new FileReader();
+
+
+                    reader.onload =
+                        function () {
+
+                            const result =
+                                reader.result;
+
+
+                            const commaIndex =
+                                result.indexOf(",");
+
+
+                            if (
+                                commaIndex >= 0
+                            ) {
+
+                                resolve(
+                                    result.substring(
+                                        commaIndex + 1
+                                    )
+                                );
+
+                            } else {
+
+                                resolve(result);
+                            }
+                        };
+
+
+                    reader.onerror =
+                        function () {
+
+                            reject(
+                                new Error(
+                                    "Failed to read image"
+                                )
+                            );
+                        };
+
+
+                    reader.readAsDataURL(
+                        blob
+                    );
+                }
+            );
         }
 
 
         // =====================================================
-        // Prepare four camera images for one payload
+        // Load all four camera images
         // =====================================================
 
-        async prepareImages(
-            payload
-        ) {
+        async prepareImages(payload) {
 
             const frameId =
                 payload.frame_id;
@@ -704,7 +556,6 @@
                             .cameras
                             [cameraName]
                             .image =
-
                             await this.loadImageBase64(
                                 cameraName,
                                 frameId
@@ -719,130 +570,8 @@
 
 
         // =====================================================
-        // Preload future frames
-        //
-        // This runs in the background while the replay
-        // continues.
-        // =====================================================
-
-        async preloadFrames(
-            startIndex
-        ) {
-
-            if (
-                !this.totalFrames
-            ) {
-
-                return;
-            }
-
-
-            const endIndex =
-                Math.min(
-                    startIndex +
-                    this.preloadAhead,
-
-                    this.totalFrames
-                );
-
-
-            const jobs = [];
-
-
-            for (
-                let index = startIndex;
-                index < endIndex;
-                index++
-            ) {
-
-                // ---------------------------------------------
-                // Already scheduled?
-                // ---------------------------------------------
-
-                if (
-                    this.preloadingIndexes.has(
-                        index
-                    )
-                ) {
-
-                    continue;
-                }
-
-
-                this.preloadingIndexes.add(
-                    index
-                );
-
-
-                try {
-
-                    const payload =
-                        this.preparePayload(
-                            this.rows[index]
-                        );
-
-
-                    const frameId =
-                        payload.frame_id;
-
-
-                    // -----------------------------------------
-                    // Load all four cameras
-                    // -----------------------------------------
-
-                    for (
-                        const cameraName
-                        of CAMERA_NAMES
-                    ) {
-
-                        jobs.push(
-                            this.loadImageBase64(
-                                cameraName,
-                                frameId
-                            )
-                        );
-                    }
-
-                } catch (error) {
-
-                    console.warn(
-                        "[PerceptionReplay] " +
-                        "Preload preparation failed:",
-                        error
-                    );
-                }
-            }
-
-
-            if (
-                jobs.length > 0
-            ) {
-
-                /*
-                 * Do not block playback.
-                 *
-                 * We intentionally do not await this
-                 * from publishFrame().
-                 */
-
-                Promise.allSettled(
-                    jobs
-                ).then(
-                    () => {
-
-                        /*
-                         * Preloading completed.
-                         *
-                         * The images now live in imageCache.
-                         */
-                    }
-                );
-            }
-        }
-
-
-        // =====================================================
         // Load CSV
+        // Equivalent to _get_total_frames()
         // =====================================================
 
         async loadCsv() {
@@ -857,15 +586,12 @@
                 await fetch(
                     this.csvPath,
                     {
-                        cache:
-                            "no-store"
+                        cache: "no-store"
                     }
                 );
 
 
-            if (
-                !response.ok
-            ) {
+            if (!response.ok) {
 
                 throw new Error(
                     "CSV not found: " +
@@ -921,10 +647,6 @@
             }
 
 
-            // -------------------------------------------------
-            // Current CSV row
-            // -------------------------------------------------
-
             const row =
                 this.rows[
                     this.rowIndex
@@ -942,10 +664,7 @@
 
 
             // -------------------------------------------------
-            // Load images
-            //
-            // Usually this is now a cache hit because
-            // preloadFrames() has already loaded them.
+            // Load four camera images
             // -------------------------------------------------
 
             payload =
@@ -955,7 +674,7 @@
 
 
             // -------------------------------------------------
-            // Trajectory reset at first frame
+            // Reset trajectory at start of replay
             // -------------------------------------------------
 
             if (
@@ -968,7 +687,7 @@
 
 
             // -------------------------------------------------
-            // Send to dashboard
+            // Push to existing dashboard
             // -------------------------------------------------
 
             if (
@@ -978,7 +697,7 @@
 
                 throw new Error(
                     "updateDashboard() " +
-                    "was not found."
+                    "was not found in dashboard."
                 );
             }
 
@@ -996,7 +715,7 @@
 
 
             // -------------------------------------------------
-            // Progress logging
+            // Progress
             // -------------------------------------------------
 
             if (
@@ -1018,30 +737,14 @@
 
 
             // -------------------------------------------------
-            // Move to next frame
+            // Next CSV row
             // -------------------------------------------------
 
             this.rowIndex++;
 
 
             // -------------------------------------------------
-            // Start background preload
-            // for upcoming frames.
-            // -------------------------------------------------
-
-            if (
-                this.rowIndex <
-                this.totalFrames
-            ) {
-
-                this.preloadFrames(
-                    this.rowIndex
-                );
-            }
-
-
-            // -------------------------------------------------
-            // End of replay
+            // Replay finished
             // -------------------------------------------------
 
             if (
@@ -1057,32 +760,16 @@
                 );
 
 
-                // ---------------------------------------------
-                // Start again from frame 1.
-                // ---------------------------------------------
+                // Restart from frame 1
+                this.rowIndex = 0;
 
-                this.rowIndex =
-                    0;
-
-                this.frameCount =
-                    0;
-
-
-                /*
-                 * Do NOT clear imageCache.
-                 *
-                 * This is intentional.
-                 *
-                 * The browser can immediately reuse
-                 * the downloaded images on the next
-                 * iteration.
-                 */
+                this.frameCount = 0;
             }
         }
 
 
         // =====================================================
-        // Start replay
+        // Start continuous replay
         // =====================================================
 
         async replay() {
@@ -1095,8 +782,7 @@
             }
 
 
-            this.running =
-                true;
+            this.running = true;
 
 
             console.log(
@@ -1112,30 +798,16 @@
             );
 
 
-            console.log(
-                "[PerceptionReplay] " +
-                "Preload window: " +
-                this.preloadAhead +
-                " frames"
-            );
-
-
-            // -------------------------------------------------
-            // Load CSV once
-            // -------------------------------------------------
-
             await this.loadCsv();
 
 
             // -------------------------------------------------
-            // Initial replay state
+            // Reset replay state
             // -------------------------------------------------
 
-            this.rowIndex =
-                0;
+            this.rowIndex = 0;
 
-            this.frameCount =
-                0;
+            this.frameCount = 0;
 
 
             // -------------------------------------------------
@@ -1149,32 +821,13 @@
 
                 window.updateDashboard({
 
-                    trajectory_reset:
-                        true,
+                    trajectory_reset: true,
 
                     replay_total_frames:
                         this.totalFrames
                 });
             }
 
-
-            // -------------------------------------------------
-            // Start preloading immediately.
-            //
-            // We intentionally DO NOT await this.
-            //
-            // Playback starts while the first 20 frames
-            // are being downloaded.
-            // -------------------------------------------------
-
-            this.preloadFrames(
-                0
-            );
-
-
-            // -------------------------------------------------
-            // Target frame period
-            // -------------------------------------------------
 
             const framePeriod =
                 this.targetFps > 0
@@ -1228,10 +881,7 @@
                     }
 
 
-                    // -------------------------------------------------
-                    // Maximum speed mode
-                    // -------------------------------------------------
-
+                    // Maximum speed
                     if (
                         framePeriod <= 0
                     ) {
@@ -1247,7 +897,7 @@
 
 
                     // -------------------------------------------------
-                    // Compensate for processing time
+                    // Maintain target FPS
                     // -------------------------------------------------
 
                     const elapsed =
@@ -1293,6 +943,7 @@
                     this.timer
                 );
 
+
                 this.timer =
                     null;
             }
@@ -1307,7 +958,7 @@
 
 
     // =========================================================
-    // Expose globally
+    // Make class accessible globally
     // =========================================================
 
     window.PerceptionReplay =
@@ -1315,7 +966,7 @@
 
 
     // =========================================================
-    // Automatic startup
+    // Automatically start when dashboard loads
     // =========================================================
 
     window.addEventListener(
