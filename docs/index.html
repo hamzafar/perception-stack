@@ -289,6 +289,31 @@ const EGO_TRAIL_MAX = 600;
 const objTrails = new Map();       // id -> short trail, for the BEV comet tails
 const OBJ_TRAIL_MAX = 18;
 
+// Running bounding box of egoTrail, maintained incrementally as points are
+// added instead of being recomputed (Math.min/max over up to 600 points,
+// via two fresh 600-element arrays) on every drawTraj() call. drawTraj
+// runs on requestAnimationFrame (~60fps) while egoTrail only grows at the
+// ~10fps data rate, so the old approach did ~60x more bounding-box work
+// than necessary, forever, for a box that only actually changes ~10x/sec.
+let egoTrailMinX = Infinity;
+let egoTrailMaxX = -Infinity;
+let egoTrailMinY = Infinity;
+let egoTrailMaxY = -Infinity;
+
+function resetEgoTrailBounds() {
+  egoTrailMinX = Infinity;
+  egoTrailMaxX = -Infinity;
+  egoTrailMinY = Infinity;
+  egoTrailMaxY = -Infinity;
+}
+
+function growEgoTrailBounds(x, y) {
+  if (x < egoTrailMinX) egoTrailMinX = x;
+  if (x > egoTrailMaxX) egoTrailMaxX = x;
+  if (y < egoTrailMinY) egoTrailMinY = y;
+  if (y > egoTrailMaxY) egoTrailMaxY = y;
+}
+
 // ---- single entry point: call this on every ROS callback (via the WS bridge) ----
 function updateDashboard(data){
   if(!data) return;
@@ -303,6 +328,7 @@ function updateDashboard(data){
   if (data.trajectory_reset === true) {
       egoTrail.length = 0;
       objTrails.clear();
+      resetEgoTrailBounds();
 
       const progressBar =
           document.getElementById('replay-progress');
@@ -313,7 +339,17 @@ function updateDashboard(data){
   }
   if(data.ego && (data.ego.world_x !== undefined || data.ego.world_y !== undefined)){
     egoTrail.push({x: state.ego.world_x, y: state.ego.world_y});
-    if(egoTrail.length > EGO_TRAIL_MAX) egoTrail.shift();
+    growEgoTrailBounds(state.ego.world_x, state.ego.world_y);
+    if(egoTrail.length > EGO_TRAIL_MAX) {
+      egoTrail.shift();
+      // The point we just dropped might have been a bounds extreme.
+      // Recomputing here is a single O(600) pass at the ~10fps data
+      // rate (not the 60fps render rate), so it's cheap and keeps the
+      // inset from staying "zoomed out" forever after an old extreme
+      // point ages out.
+      resetEgoTrailBounds();
+      for (const p of egoTrail) growEgoTrailBounds(p.x, p.y);
+    }
   }
   if(data.bev_objects){
     const activeIds = new Set(data.bev_objects.map(o => o.id));
@@ -652,9 +688,8 @@ function drawTraj(){
   if(pts.length<2){ requestAnimationFrame(drawTraj); return; }
 
   const pad=12;
-  const xs=pts.map(p=>p.x), ys=pts.map(p=>p.y);
-  const minX=Math.min(...xs), maxX=Math.max(...xs);
-  const minY=Math.min(...ys), maxY=Math.max(...ys);
+  const minX=egoTrailMinX, maxX=egoTrailMaxX;
+  const minY=egoTrailMinY, maxY=egoTrailMaxY;
   const spanX=Math.max(maxX-minX,1), spanY=Math.max(maxY-minY,1);
   const scale=Math.min((traj.width-pad*2)/spanX,(traj.height-pad*2)/spanY);
   const midX=(minX+maxX)/2, midY=(minY+maxY)/2;
