@@ -367,6 +367,7 @@ function updateDashboard(data){
     for(const id of objTrails.keys()){
       if(!activeIds.has(id)) objTrails.delete(id);
     }
+     drawBev();
   }
 
   if(data.cameras) renderCameras();
@@ -374,7 +375,12 @@ function updateDashboard(data){
      data.objects_count || data.gpu_pct!==undefined || data.cpu_pct!==undefined) renderHeader();
   // if(data.frame_id !== undefined) {renderFooter();}
   if(data.frame_id !== undefined) {renderFooter();renderReplayProgress();}
-  if(data.ego) renderEgoPanel();
+  // if(data.ego) renderEgoPanel();
+  if(data.ego) {renderEgoPanel();
+    if (data.ego.world_x !== undefined ||data.ego.world_y !== undefined) {
+        drawTraj();
+    }
+}
   if(data.nearest_objects) renderNearestList();
 }
 window.updateDashboard = updateDashboard;
@@ -695,9 +701,9 @@ function drawBev(){
   bctx.beginPath(); bctx.moveTo(0,-9); bctx.lineTo(6,7); bctx.lineTo(-6,7); bctx.closePath(); bctx.fill();
   bctx.restore();
 
-  requestAnimationFrame(drawBev);
+  // requestAnimationFrame(drawBev);
 }
-drawBev();
+// drawBev();
 
 // ---- trajectory inset: auto-fit view of ego's full path (client-side
 // egoTrail, fed by ego.world_x/world_y) ----
@@ -706,7 +712,8 @@ const tctx=traj.getContext('2d');
 function drawTraj(){
   tctx.clearRect(0,0,traj.width,traj.height);
   const pts=egoTrail;
-  if(pts.length<2){ requestAnimationFrame(drawTraj); return; }
+  // if(pts.length<2){ requestAnimationFrame(drawTraj); return; }
+  if(pts.length<2){return; }
 
   const pad=12;
   const minX=egoTrailMinX, maxX=egoTrailMaxX;
@@ -736,9 +743,9 @@ function drawTraj(){
   tctx.beginPath(); tctx.moveTo(0,-5); tctx.lineTo(3.5,4); tctx.lineTo(-3.5,4); tctx.closePath(); tctx.fill();
   tctx.restore();
 
-  requestAnimationFrame(drawTraj);
+  // requestAnimationFrame(drawTraj);
 }
-drawTraj();
+// drawTraj();
 </script>
 <script src="replay.js"></script>
 </body>
