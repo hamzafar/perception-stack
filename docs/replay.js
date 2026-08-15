@@ -1,22 +1,28 @@
 /*
  * replay.js
  *
- * FULL PRELOAD TEST
+ * ROLLING WINDOW REPLAY
  *
- * Loads the first 100 perception frames completely
- * before starting playback.
+ * Architecture:
  *
- * 100 frames
- * × 4 cameras
- * = 400 images
+ *   Initial buffer:
+ *       20 frames
+ *       × 4 cameras
+ *       = 80 images
  *
- * The code measures:
+ *   Playback:
+ *       10 FPS
  *
- *   1. Total preload time
- *   2. Average time per image
- *   3. Average time per frame
+ *   Background:
+ *       Continuously prepares future frames
  *
- * Playback starts ONLY after all 100 frames are ready.
+ *   Cache:
+ *       Bounded to approximately 20 frames
+ *
+ * Images:
+ *       400x300
+ *       Native Image()
+ *       img.decode()
  */
 
 (function () {
@@ -53,27 +59,28 @@
 
 
     // ---------------------------------------------------------
-    // TEST SETTING
+    // Rolling window size
     //
-    // Load 100 frames before playback.
+    // At 10 FPS:
     //
-    // If CSV contains fewer than 100 frames,
-    // all available frames are loaded.
+    // 20 frames = 2 seconds of buffer
+    //
+    // 20 frames × 4 cameras = 80 images
     // ---------------------------------------------------------
 
-    const PRELOAD_FRAMES =
-        110;
+    const ROLLING_WINDOW_FRAMES =
+        20;
 
 
     // ---------------------------------------------------------
     // Number of COMPLETE frames loaded concurrently.
     //
-    // 2 frames × 4 cameras
-    // = 8 image loads concurrently.
+    // 4 frames × 4 cameras
+    // = 16 image loads concurrently
     // ---------------------------------------------------------
 
     const FRAME_LOAD_CONCURRENCY =
-        2;
+        4;
 
 
     // =========================================================
@@ -96,23 +103,26 @@
             this.printEvery =
                 PRINT_EVERY;
 
+
             this.rows =
                 [];
 
             this.totalFrames =
                 0;
 
-            this.preloadCount =
-                0;
 
+            // Current replay position.
             this.rowIndex =
                 0;
+
 
             this.frameCount =
                 0;
 
+
             this.running =
                 false;
+
 
             this.timer =
                 null;
@@ -120,6 +130,8 @@
 
             // -------------------------------------------------
             // frameId -> camera assets
+            //
+            // Only the rolling window should remain here.
             // -------------------------------------------------
 
             this.imageCache =
@@ -127,11 +139,21 @@
 
 
             // -------------------------------------------------
-            // Prevent duplicate loads.
+            // frameId -> Promise
+            //
+            // Prevents duplicate loading.
             // -------------------------------------------------
 
             this.loading =
                 new Map();
+
+
+            // -------------------------------------------------
+            // Prevent multiple rolling loaders.
+            // -------------------------------------------------
+
+            this.loaderRunning =
+                false;
         }
 
 
@@ -502,6 +524,19 @@
             }
 
 
+            // -------------------------------------------------
+            // Wrap around for replay looping.
+            // -------------------------------------------------
+
+            index =
+                (
+                    index %
+                    this.totalFrames +
+                    this.totalFrames
+                ) %
+                this.totalFrames;
+
+
             const row =
                 this.rows[index];
 
@@ -590,8 +625,8 @@
 
                                     } catch (_) {
 
-                                        // Image is already
-                                        // loaded and usable.
+                                        // The image has already
+                                        // loaded and is usable.
                                     }
                                 }
 
@@ -689,7 +724,7 @@
                     } else {
 
                         console.error(
-                            "[PRELOAD] Failed:",
+                            "[BUFFER] Failed:",
                             cameraName,
                             frameId,
                             result.reason
@@ -717,6 +752,7 @@
             frameId
         ) {
 
+            // Already cached.
             if (
                 this.imageCache.has(
                     frameId
@@ -731,6 +767,7 @@
             }
 
 
+            // Already being loaded.
             if (
                 this.loading.has(
                     frameId
@@ -773,7 +810,7 @@
 
 
                         console.error(
-                            "[PRELOAD] Frame failed:",
+                            "[BUFFER] Frame failed:",
                             frameId,
                             error
                         );
@@ -811,27 +848,227 @@
 
 
         // =====================================================
-        // PRELOAD ALL TEST FRAMES
-        //
-        // This is the important measurement.
+        // Build list of frames that should be in the buffer
         // =====================================================
 
-        async preloadAll() {
+        getDesiredFrameIds() {
+
+            const desired =
+                new Set();
+
+
+            for (
+                let offset = 0;
+                offset <
+                ROLLING_WINDOW_FRAMES;
+                offset++
+            ) {
+
+                const index =
+                    this.rowIndex +
+                    offset;
+
+
+                const frameId =
+                    this.getFrameId(
+                        index
+                    );
+
+
+                if (frameId) {
+
+                    desired.add(
+                        frameId
+                    );
+                }
+            }
+
+
+            return desired;
+        }
+
+
+        // =====================================================
+        // Load missing frames for rolling window
+        // =====================================================
+
+        async fillRollingWindow() {
+
+            if (
+                !this.running
+            ) {
+
+                return;
+            }
+
+
+            const desired =
+                this.getDesiredFrameIds();
+
+
+            const missing =
+                [];
+
+
+            // -------------------------------------------------
+            // Find frames not already cached or loading.
+            // -------------------------------------------------
+
+            for (
+                const frameId
+                of desired
+            ) {
+
+                if (
+                    !this.imageCache.has(
+                        frameId
+                    ) &&
+                    !this.loading.has(
+                        frameId
+                    )
+                ) {
+
+                    missing.push(
+                        frameId
+                    );
+                }
+            }
+
+
+            // -------------------------------------------------
+            // Load missing frames in batches.
+            // -------------------------------------------------
+
+            for (
+                let i = 0;
+                i < missing.length;
+                i += FRAME_LOAD_CONCURRENCY
+            ) {
+
+                if (
+                    !this.running
+                ) {
+
+                    return;
+                }
+
+
+                const batch =
+                    missing.slice(
+                        i,
+                        i +
+                        FRAME_LOAD_CONCURRENCY
+                    );
+
+
+                await Promise.all(
+                    batch.map(
+                        frameId =>
+                            this.loadFrame(
+                                frameId
+                            )
+                    )
+                );
+            }
+
+
+            // -------------------------------------------------
+            // Evict frames outside the rolling window.
+            // -------------------------------------------------
+
+            for (
+                const frameId
+                of Array.from(
+                    this.imageCache.keys()
+                )
+            ) {
+
+                if (
+                    !desired.has(
+                        frameId
+                    )
+                ) {
+
+                    this.imageCache.delete(
+                        frameId
+                    );
+                }
+            }
+
+
+            console.log(
+                "[BUFFER] Cache:",
+                this.imageCache.size,
+                "frames | current:",
+                this.getFrameId(
+                    this.rowIndex
+                )
+            );
+        }
+
+
+        // =====================================================
+        // Background rolling loader
+        // =====================================================
+
+        async rollingLoader() {
+
+            if (
+                this.loaderRunning
+            ) {
+
+                return;
+            }
+
+
+            this.loaderRunning =
+                true;
+
+
+            console.log(
+                "[BUFFER] Rolling loader started."
+            );
+
+
+            while (
+                this.running
+            ) {
+
+                await this.fillRollingWindow();
+
+
+                // Give the browser some breathing room.
+                await new Promise(
+                    resolve =>
+                        setTimeout(
+                            resolve,
+                            20
+                        )
+                );
+            }
+
+
+            this.loaderRunning =
+                false;
+
+
+            console.log(
+                "[BUFFER] Rolling loader stopped."
+            );
+        }
+
+
+        // =====================================================
+        // Initial buffer
+        // =====================================================
+
+        async preloadInitialWindow() {
 
             const count =
                 Math.min(
-                    PRELOAD_FRAMES,
+                    ROLLING_WINDOW_FRAMES,
                     this.totalFrames
                 );
-
-
-            this.preloadCount =
-                count;
-
-
-            const totalImages =
-                count *
-                CAMERA_NAMES.length;
 
 
             console.log(
@@ -840,39 +1077,26 @@
 
 
             console.log(
-                "[PRELOAD] Starting full preload"
+                "[BUFFER] Preparing initial buffer"
             );
 
 
             console.log(
-                "[PRELOAD] Frames:",
+                "[BUFFER] Frames:",
                 count
             );
 
 
             console.log(
-                "[PRELOAD] Cameras:",
+                "[BUFFER] Images:",
+                count *
                 CAMERA_NAMES.length
             );
 
 
             console.log(
-                "[PRELOAD] Total images:",
-                totalImages
-            );
-
-
-            console.log(
-                "[PRELOAD] Concurrency:",
-                FRAME_LOAD_CONCURRENCY,
-                "frames"
-            );
-
-
-            console.log(
-                "[PRELOAD] Images concurrently:",
-                FRAME_LOAD_CONCURRENCY *
-                CAMERA_NAMES.length
+                "[BUFFER] Concurrency:",
+                FRAME_LOAD_CONCURRENCY
             );
 
 
@@ -881,12 +1105,8 @@
             );
 
 
-            const startTime =
+            const start =
                 performance.now();
-
-
-            let completed =
-                0;
 
 
             for (
@@ -901,8 +1121,7 @@
 
                 for (
                     let j = i;
-                    j <
-                    Math.min(
+                    j < Math.min(
                         i +
                         FRAME_LOAD_CONCURRENCY,
                         count
@@ -930,149 +1149,25 @@
                 await Promise.all(
                     batch
                 );
-
-
-                completed +=
-                    batch.length;
-
-
-                const elapsed =
-                    performance.now() -
-                    startTime;
-
-
-                const seconds =
-                    elapsed /
-                    1000;
-
-
-                const imagesDone =
-                    completed *
-                    CAMERA_NAMES.length;
-
-
-                const avgImage =
-                    imagesDone > 0
-                        ? elapsed /
-                          imagesDone
-                        : 0;
-
-
-                const avgFrame =
-                    completed > 0
-                        ? elapsed /
-                          completed
-                        : 0;
-
-
-                console.log(
-                    "[PRELOAD]",
-                    completed +
-                    "/" +
-                    count,
-                    "frames |",
-                    imagesDone +
-                    "/" +
-                    totalImages,
-                    "images |",
-                    seconds.toFixed(2),
-                    "s |",
-                    "avg image:",
-                    avgImage.toFixed(1),
-                    "ms |",
-                    "avg frame:",
-                    avgFrame.toFixed(1),
-                    "ms"
-                );
             }
 
 
-            const totalTime =
+            const elapsed =
                 performance.now() -
-                startTime;
-
-
-            const totalSeconds =
-                totalTime /
-                1000;
-
-
-            const averageImageTime =
-                totalImages > 0
-                    ? totalTime /
-                      totalImages
-                    : 0;
-
-
-            const averageFrameTime =
-                count > 0
-                    ? totalTime /
-                      count
-                    : 0;
+                start;
 
 
             console.log(
-                ""
-            );
-
-
-            console.log(
-                "========================================"
-            );
-
-
-            console.log(
-                "[PRELOAD] COMPLETE"
-            );
-
-
-            console.log(
-                "========================================"
-            );
-
-
-            console.log(
-                "Frames loaded:",
-                count
-            );
-
-
-            console.log(
-                "Images loaded:",
-                totalImages
-            );
-
-
-            console.log(
-                "Total preload time:",
-                totalSeconds.toFixed(2),
+                "[BUFFER] Initial buffer ready in:",
+                (elapsed / 1000).toFixed(2),
                 "seconds"
             );
 
 
             console.log(
-                "Average per image:",
-                averageImageTime.toFixed(2),
-                "ms"
-            );
-
-
-            console.log(
-                "Average per frame:",
-                averageFrameTime.toFixed(2),
-                "ms"
-            );
-
-
-            console.log(
-                "Cache size:",
+                "[BUFFER] Cache:",
                 this.imageCache.size,
                 "frames"
-            );
-
-
-            console.log(
-                "========================================"
             );
         }
 
@@ -1113,10 +1208,44 @@
                 );
 
 
+            // -------------------------------------------------
+            // This should normally never happen.
+            //
+            // If it does, the producer has fallen behind.
+            // -------------------------------------------------
+
             if (!assets) {
 
+                console.warn(
+                    "[REPLAY] Frame not ready:",
+                    frameId,
+                    "| Waiting for buffer..."
+                );
+
+
+                const loaded =
+                    await this.loadFrame(
+                        frameId
+                    );
+
+
+                if (!loaded) {
+
+                    return;
+                }
+            }
+
+
+            const readyAssets =
+                this.imageCache.get(
+                    frameId
+                );
+
+
+            if (!readyAssets) {
+
                 console.error(
-                    "[REPLAY] Missing preloaded frame:",
+                    "[REPLAY] Could not obtain:",
                     frameId
                 );
 
@@ -1126,7 +1255,7 @@
 
 
             // -------------------------------------------------
-            // Attach preloaded images.
+            // Attach images.
             // -------------------------------------------------
 
             for (
@@ -1138,7 +1267,7 @@
                     payload.cameras[
                         cameraName
                     ],
-                    assets[
+                    readyAssets[
                         cameraName
                     ] || {}
                 );
@@ -1146,7 +1275,7 @@
 
 
             // -------------------------------------------------
-            // Trajectory reset.
+            // Reset trajectory at replay start.
             // -------------------------------------------------
 
             if (
@@ -1159,7 +1288,7 @@
 
 
             // -------------------------------------------------
-            // Dashboard.
+            // Dashboard update.
             // -------------------------------------------------
 
             if (
@@ -1192,25 +1321,31 @@
                     "[REPLAY] Frame:",
                     this.frameCount,
                     "|",
-                    frameId
+                    frameId,
+                    "| cache:",
+                    this.imageCache.size
                 );
             }
 
+
+            // -------------------------------------------------
+            // Advance replay.
+            // -------------------------------------------------
 
             this.rowIndex++;
 
 
             // -------------------------------------------------
-            // Loop after the preloaded 100 frames.
+            // Full replay loop.
             // -------------------------------------------------
 
             if (
                 this.rowIndex >=
-                this.preloadCount
+                this.totalFrames
             ) {
 
                 console.log(
-                    "[REPLAY] 100-frame loop complete."
+                    "[REPLAY] Full replay complete."
                 );
 
 
@@ -1305,21 +1440,21 @@
             try {
 
                 // -------------------------------------------------
-                // Load CSV
+                // Load CSV.
                 // -------------------------------------------------
 
                 await this.loadCsv();
 
 
                 // -------------------------------------------------
-                // Preload 100 frames
+                // Prepare first 20 frames.
                 // -------------------------------------------------
 
-                await this.preloadAll();
+                await this.preloadInitialWindow();
 
 
                 // -------------------------------------------------
-                // Tell dashboard that replay is ready.
+                // Tell dashboard replay is ready.
                 // -------------------------------------------------
 
                 if (
@@ -1333,9 +1468,16 @@
                             true,
 
                         replay_total_frames:
-                            this.preloadCount
+                            this.totalFrames
                     });
                 }
+
+
+                // -------------------------------------------------
+                // Start background rolling loader.
+                // -------------------------------------------------
+
+                this.rollingLoader();
 
 
                 // -------------------------------------------------
@@ -1446,6 +1588,12 @@
                 this.timer =
                     null;
             }
+
+
+            this.loading.clear();
+
+
+            this.imageCache.clear();
 
 
             console.log(
