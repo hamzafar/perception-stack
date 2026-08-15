@@ -1,26 +1,14 @@
 /*
  * replay.js
  *
- * MEMORY-ONLY CAMERA DIAGNOSTIC
+ * Rolling decoded-image buffer
  *
- * Purpose:
- *   Test whether intermittent dashboard lag is caused by
- *   JPEG fetch/decode/cache activity.
+ * 10 FPS replay
+ * 20-frame rolling camera window
+ * 4 cameras
  *
- * Camera images:
- *   - 4 JPEGs are loaded once
- *   - decoded once into ImageBitmap
- *   - kept in browser memory
- *   - reused for every replay frame
- *
- * Perception data:
- *   - real perception.csv
- *   - still updates at 10 FPS
- *
- * IMPORTANT:
- *   This is a diagnostic version.
- *   It intentionally uses the same four camera images
- *   for every frame.
+ * Playback does NOT fetch/decode the current frame.
+ * Camera images are decoded ahead of playback and kept in memory.
  */
 
 (function () {
@@ -39,17 +27,24 @@
         "right"
     ];
 
-    const CSV_PATH =
-        "data/perception.csv";
+    const CSV_PATH = "data/perception.csv";
+    const DATASET_PATH = "data";
 
-    const DATASET_PATH =
-        "data";
+    const TARGET_FPS = 10.0;
 
-    const TARGET_FPS =
-        10.0;
+    const PRINT_EVERY = 50;
 
-    const PRINT_EVERY =
-        50;
+    // Number of decoded frames kept in memory.
+    //
+    // 20 frames × 4 cameras = 80 ImageBitmaps maximum.
+    //
+    // At 10 FPS:
+    // 20 frames = 2 seconds of camera buffer.
+    const ROLLING_WINDOW_FRAMES = 20;
+
+    // Number of frames loaded simultaneously.
+    // Keep this modest to avoid browser/network bursts.
+    const FRAME_LOAD_CONCURRENCY = 2;
 
 
     // =========================================================
@@ -60,55 +55,45 @@
 
         constructor() {
 
-            this.csvPath =
-                CSV_PATH;
+            this.csvPath = CSV_PATH;
+            this.datasetPath = DATASET_PATH;
 
-            this.datasetPath =
-                DATASET_PATH;
+            this.targetFps = TARGET_FPS;
+            this.printEvery = PRINT_EVERY;
 
-            this.targetFps =
-                TARGET_FPS;
+            this.rows = [];
+            this.totalFrames = 0;
 
-            this.printEvery =
-                PRINT_EVERY;
+            this.rowIndex = 0;
+            this.frameCount = 0;
 
-            this.frameCount =
-                0;
-
-            this.totalFrames =
-                0;
-
-            this.rows =
-                [];
-
-            this.rowIndex =
-                0;
-
-            this.running =
-                false;
-
-            this.timer =
-                null;
+            this.running = false;
+            this.timer = null;
 
             // -------------------------------------------------
-            // Four decoded images kept permanently in memory.
-            //
-            // Example:
-            //
-            // this.memoryImages.front.bitmap
-            // this.memoryImages.rear.bitmap
+            // frameId -> {
+            //     front: { bitmap },
+            //     rear:  { bitmap },
+            //     left:  { bitmap },
+            //     right: { bitmap }
+            // }
             // -------------------------------------------------
 
-            this.memoryImages =
-                {};
+            this.imageCache = new Map();
 
-            this.memoryImagesReady =
-                false;
+            // Frames currently being loaded.
+            //
+            // frameId -> Promise
+            //
+            // Prevents duplicate loading of the same frame.
+            this.loading = new Map();
+
+            this.rollingLoaderRunning = false;
         }
 
 
         // =====================================================
-        // Decode CSV value
+        // CSV value decoder
         // =====================================================
 
         decodeCsvValue(value) {
@@ -118,18 +103,12 @@
                 value === null ||
                 value === ""
             ) {
-
                 return value;
             }
 
             try {
-
-                return JSON.parse(
-                    value
-                );
-
+                return JSON.parse(value);
             } catch (_) {
-
                 return value;
             }
         }
@@ -137,7 +116,6 @@
 
         // =====================================================
         // CSV parser
-        // Handles JSON fields containing commas.
         // =====================================================
 
         parseCsv(text) {
@@ -145,11 +123,8 @@
             const rows = [];
 
             let row = [];
-
             let field = "";
-
             let quoted = false;
-
 
             for (
                 let i = 0;
@@ -157,26 +132,20 @@
                 i++
             ) {
 
-                const ch =
-                    text[i];
-
+                const ch = text[i];
 
                 if (quoted) {
 
                     if (ch === '"') {
 
-                        if (
-                            text[i + 1] === '"'
-                        ) {
+                        if (text[i + 1] === '"') {
 
                             field += '"';
-
                             i++;
 
                         } else {
 
-                            quoted =
-                                false;
+                            quoted = false;
                         }
 
                     } else {
@@ -187,100 +156,58 @@
                     continue;
                 }
 
-
                 if (ch === '"') {
 
-                    quoted =
-                        true;
+                    quoted = true;
 
-                } else if (
-                    ch === ","
-                ) {
+                } else if (ch === ",") {
 
-                    row.push(
-                        field
-                    );
+                    row.push(field);
+                    field = "";
 
-                    field =
-                        "";
+                } else if (ch === "\n") {
 
-                } else if (
-                    ch === "\n"
-                ) {
+                    row.push(field);
+                    rows.push(row);
 
-                    row.push(
-                        field
-                    );
+                    row = [];
+                    field = "";
 
-                    rows.push(
-                        row
-                    );
-
-                    row =
-                        [];
-
-                    field =
-                        "";
-
-                } else if (
-                    ch !== "\r"
-                ) {
+                } else if (ch !== "\r") {
 
                     field += ch;
                 }
             }
-
 
             if (
                 field.length > 0 ||
                 row.length > 0
             ) {
 
-                row.push(
-                    field
-                );
-
-                rows.push(
-                    row
-                );
+                row.push(field);
+                rows.push(row);
             }
 
-
-            if (
-                rows.length === 0
-            ) {
-
+            if (rows.length === 0) {
                 return [];
             }
 
-
-            const headers =
-                rows[0];
-
+            const headers = rows[0];
 
             return rows
                 .slice(1)
-                .filter(
-                    values =>
-                        values.some(
-                            value =>
-                                value !== ""
-                        )
+                .filter(values =>
+                    values.some(value => value !== "")
                 )
                 .map(values => {
 
-                    const object =
-                        {};
+                    const object = {};
 
                     headers.forEach(
-                        (
-                            header,
-                            index
-                        ) => {
+                        (header, index) => {
 
                             object[header] =
-                                values[index] ??
-                                "";
+                                values[index] ?? "";
                         }
                     );
 
@@ -295,19 +222,10 @@
 
         preparePayload(row) {
 
-            const payload =
-                {};
-
-
-            // -------------------------------------------------
-            // Decode CSV fields
-            // -------------------------------------------------
+            const payload = {};
 
             for (
-                const [
-                    key,
-                    value
-                ]
+                const [key, value]
                 of Object.entries(row)
             ) {
 
@@ -315,15 +233,11 @@
                     value === null ||
                     value === undefined
                 ) {
-
                     continue;
                 }
 
-
                 payload[key] =
-                    this.decodeCsvValue(
-                        value
-                    );
+                    this.decodeCsvValue(value);
             }
 
 
@@ -334,12 +248,10 @@
             let frameId =
                 payload.frame_id;
 
-
             if (!frameId) {
 
                 const frameIdx =
                     payload.frame_idx;
-
 
                 if (
                     frameIdx === undefined ||
@@ -353,16 +265,10 @@
                     );
                 }
 
-
                 frameId =
                     "frame_" +
-                    String(
-                        Number(frameIdx)
-                    ).padStart(
-                        6,
-                        "0"
-                    );
-
+                    String(Number(frameIdx))
+                        .padStart(6, "0");
 
                 payload.frame_id =
                     frameId;
@@ -374,24 +280,17 @@
             // -------------------------------------------------
 
             if (
-                payload.frame_idx ===
-                undefined
+                payload.frame_idx === undefined
             ) {
 
                 const match =
-                    String(
-                        frameId
-                    ).match(
-                        /(\d+)$/
-                    );
-
+                    String(frameId)
+                        .match(/(\d+)$/);
 
                 if (match) {
 
                     payload.frame_idx =
-                        Number(
-                            match[1]
-                        );
+                        Number(match[1]);
                 }
             }
 
@@ -403,17 +302,14 @@
             let cameras =
                 payload.cameras;
 
-
             if (
                 !cameras ||
                 typeof cameras !== "object" ||
                 Array.isArray(cameras)
             ) {
 
-                cameras =
-                    {};
+                cameras = {};
             }
-
 
             for (
                 const cameraName
@@ -421,10 +317,7 @@
             ) {
 
                 let cameraData =
-                    cameras[
-                        cameraName
-                    ];
-
+                    cameras[cameraName];
 
                 if (
                     !cameraData ||
@@ -432,44 +325,86 @@
                     Array.isArray(cameraData)
                 ) {
 
-                    cameraData =
-                        {};
+                    cameraData = {};
                 }
-
 
                 if (
-                    !Array.isArray(
-                        cameraData.boxes
-                    )
+                    !Array.isArray(cameraData.boxes)
                 ) {
 
-                    cameraData.boxes =
-                        [];
+                    cameraData.boxes = [];
                 }
 
-
-                cameras[
-                    cameraName
-                ] =
+                cameras[cameraName] =
                     cameraData;
             }
 
-
             payload.cameras =
                 cameras;
-
 
             return payload;
         }
 
 
         // =====================================================
-        // Load one camera image
-        //
-        // This happens ONLY ONCE per camera.
+        // Get frame ID from CSV row
         // =====================================================
 
-        async loadMemoryImage(
+        getFrameId(index) {
+
+            if (
+                this.totalFrames <= 0
+            ) {
+                return null;
+            }
+
+            index =
+                ((index % this.totalFrames)
+                + this.totalFrames)
+                % this.totalFrames;
+
+            const row =
+                this.rows[index];
+
+            if (!row) {
+                return null;
+            }
+
+            let frameId =
+                this.decodeCsvValue(
+                    row.frame_id
+                );
+
+            if (frameId) {
+                return String(frameId);
+            }
+
+            const frameIdx =
+                this.decodeCsvValue(
+                    row.frame_idx
+                );
+
+            if (
+                frameIdx === undefined ||
+                frameIdx === null ||
+                frameIdx === ""
+            ) {
+                return null;
+            }
+
+            return (
+                "frame_" +
+                String(Number(frameIdx))
+                    .padStart(6, "0")
+            );
+        }
+
+
+        // =====================================================
+        // Load one camera
+        // =====================================================
+
+        async loadCameraAsset(
             cameraName,
             frameId
         ) {
@@ -482,18 +417,8 @@
                 frameId +
                 ".jpg";
 
-
-            console.log(
-                "[MemoryTest] Loading:",
-                imagePath
-            );
-
-
             const response =
-                await fetch(
-                    imagePath
-                );
-
+                await fetch(imagePath);
 
             if (!response.ok) {
 
@@ -502,7 +427,6 @@
                     imagePath
                 );
             }
-
 
             const blob =
                 await response.blob();
@@ -515,32 +439,16 @@
 
                 throw new Error(
                     "createImageBitmap() " +
-                    "is required for this diagnostic."
+                    "is required."
                 );
             }
 
 
-            // -------------------------------------------------
-            // Resize to approximately the dashboard display
-            // resolution so we don't keep unnecessarily huge
-            // decoded images in memory.
-            // -------------------------------------------------
-
-            let resizeHeight;
-
-
-            if (
+            // Decode near the actual dashboard size.
+            const resizeHeight =
                 cameraName === "front"
-            ) {
-
-                resizeHeight =
-                    560;
-
-            } else {
-
-                resizeHeight =
-                    220;
-            }
+                    ? 560
+                    : 220;
 
 
             const bitmap =
@@ -553,194 +461,395 @@
                 );
 
 
-            console.log(
-                "[MemoryTest] Decoded:",
-                cameraName,
-                bitmap.width +
-                "x" +
-                bitmap.height
-            );
-
-
             return {
-                bitmap:
-                    bitmap
+                bitmap: bitmap
             };
         }
 
 
         // =====================================================
-        // Preload four images into memory
-        //
-        // IMPORTANT:
-        // We intentionally use frame_000001 only.
-        //
-        // Every replay frame will reuse these same decoded
-        // ImageBitmaps.
+        // Load all 4 cameras for one frame
         // =====================================================
 
-        async preloadCameraMemory() {
-
-            console.log(
-                "[MemoryTest] -------------------------"
-            );
-
-            console.log(
-                "[MemoryTest] Loading four camera images..."
-            );
-
-            console.log(
-                "[MemoryTest] These images will remain " +
-                "in memory for the entire test."
-            );
-
-
-            const testFrameId =
-                "frame_000001";
-
-
-            const start =
-                performance.now();
-
+        async loadFrameAssets(frameId) {
 
             const results =
-                await Promise.all(
+                await Promise.allSettled(
+
                     CAMERA_NAMES.map(
-                        async cameraName => {
-
-                            const asset =
-                                await this.loadMemoryImage(
-                                    cameraName,
-                                    testFrameId
-                                );
-
-                            return [
+                        cameraName =>
+                            this.loadCameraAsset(
                                 cameraName,
-                                asset
-                            ];
-                        }
+                                frameId
+                            )
                     )
                 );
 
 
-            for (
-                const [
-                    cameraName,
-                    asset
-                ]
-                of results
-            ) {
+            const assets = {};
 
-                this.memoryImages[
-                    cameraName
-                ] =
-                    asset;
-            }
+            results.forEach(
+                (result, index) => {
 
+                    const cameraName =
+                        CAMERA_NAMES[index];
 
-            const elapsed =
-                performance.now() -
-                start;
+                    if (
+                        result.status ===
+                        "fulfilled"
+                    ) {
 
+                        assets[cameraName] =
+                            result.value;
 
-            this.memoryImagesReady =
-                true;
+                    } else {
 
+                        console.warn(
+                            "[Replay] Camera load failed:",
+                            cameraName,
+                            frameId,
+                            result.reason
+                        );
 
-            console.log(
-                "[MemoryTest] ========================="
+                        assets[cameraName] =
+                            {};
+                    }
+                }
             );
 
-            console.log(
-                "[MemoryTest] FOUR CAMERA IMAGES READY"
-            );
 
-            console.log(
-                "[MemoryTest] Initial load:",
-                elapsed.toFixed(2),
-                "ms"
-            );
-
-            console.log(
-                "[MemoryTest] No camera fetch/decode " +
-                "will occur during replay."
-            );
-
-            console.log(
-                "[MemoryTest] ========================="
-            );
+            return assets;
         }
 
 
         // =====================================================
-        // Load CSV
+        // Load frame into rolling memory
+        //
+        // Duplicate requests are prevented using this.loading.
         // =====================================================
 
-        async loadCsv() {
+        loadFrame(frameId) {
 
-            console.log(
-                "[PerceptionReplay] " +
-                "Loading CSV..."
-            );
+            if (
+                this.imageCache.has(frameId)
+            ) {
 
-
-            const response =
-                await fetch(
-                    this.csvPath,
-                    {
-                        cache:
-                            "no-store"
-                    }
-                );
-
-
-            if (!response.ok) {
-
-                throw new Error(
-                    "CSV not found: " +
-                    this.csvPath
+                return Promise.resolve(
+                    this.imageCache.get(frameId)
                 );
             }
-
-
-            const text =
-                await response.text();
-
-
-            this.rows =
-                this.parseCsv(
-                    text
-                );
-
-
-            this.totalFrames =
-                this.rows.length;
 
 
             if (
-                this.totalFrames === 0
+                this.loading.has(frameId)
             ) {
 
-                throw new Error(
-                    "CSV contains no data rows."
+                return this.loading.get(frameId);
+            }
+
+
+            const promise =
+                this.loadFrameAssets(frameId)
+                    .then(assets => {
+
+                        this.imageCache.set(
+                            frameId,
+                            assets
+                        );
+
+                        this.loading.delete(
+                            frameId
+                        );
+
+                        return assets;
+                    })
+                    .catch(error => {
+
+                        this.loading.delete(
+                            frameId
+                        );
+
+                        console.warn(
+                            "[Replay] Failed loading:",
+                            frameId,
+                            error
+                        );
+
+                        // Keep playback alive.
+                        const empty = {};
+
+                        for (
+                            const cameraName
+                            of CAMERA_NAMES
+                        ) {
+
+                            empty[cameraName] = {};
+                        }
+
+                        return empty;
+                    });
+
+
+            this.loading.set(
+                frameId,
+                promise
+            );
+
+
+            return promise;
+        }
+
+
+        // =====================================================
+        // Release one decoded frame
+        // =====================================================
+
+        releaseFrame(frameId) {
+
+            const assets =
+                this.imageCache.get(
+                    frameId
+                );
+
+            if (!assets) {
+                return;
+            }
+
+
+            this.imageCache.delete(
+                frameId
+            );
+
+
+            for (
+                const cameraName
+                of CAMERA_NAMES
+            ) {
+
+                const asset =
+                    assets[cameraName];
+
+                if (
+                    asset &&
+                    asset.bitmap &&
+                    typeof asset.bitmap.close ===
+                    "function"
+                ) {
+
+                    asset.bitmap.close();
+                }
+            }
+        }
+
+
+        // =====================================================
+        // Determine which frames should remain in memory
+        //
+        // The window is:
+        //
+        // current frame
+        // +
+        // next 19 frames
+        //
+        // Example:
+        //
+        // current = 100
+        //
+        // memory:
+        // 100 ... 119
+        // =====================================================
+
+        getDesiredWindow() {
+
+            const desired =
+                new Set();
+
+            if (
+                this.totalFrames <= 0
+            ) {
+
+                return desired;
+            }
+
+
+            for (
+                let offset = 0;
+                offset < ROLLING_WINDOW_FRAMES;
+                offset++
+            ) {
+
+                const index =
+                    (
+                        this.rowIndex +
+                        offset
+                    ) %
+                    this.totalFrames;
+
+                const frameId =
+                    this.getFrameId(index);
+
+                if (frameId) {
+                    desired.add(frameId);
+                }
+            }
+
+            return desired;
+        }
+
+
+        // =====================================================
+        // Maintain rolling window
+        //
+        // This function:
+        //
+        // 1. Loads missing future frames.
+        // 2. Keeps current/future frames.
+        // 3. Releases old frames.
+        //
+        // Concurrency is limited.
+        // =====================================================
+
+        async maintainRollingWindow() {
+
+            if (
+                !this.running ||
+                this.totalFrames <= 0
+            ) {
+
+                return;
+            }
+
+
+            const desired =
+                this.getDesiredWindow();
+
+
+            // -------------------------------------------------
+            // Find frames that are needed but not loaded.
+            // -------------------------------------------------
+
+            const missing = [];
+
+            for (
+                const frameId
+                of desired
+            ) {
+
+                if (
+                    !this.imageCache.has(
+                        frameId
+                    ) &&
+                    !this.loading.has(
+                        frameId
+                    )
+                ) {
+
+                    missing.push(frameId);
+                }
+            }
+
+
+            // -------------------------------------------------
+            // Load missing frames in small batches.
+            // -------------------------------------------------
+
+            for (
+                let i = 0;
+                i < missing.length;
+                i += FRAME_LOAD_CONCURRENCY
+            ) {
+
+                if (!this.running) {
+                    break;
+                }
+
+                const batch =
+                    missing.slice(
+                        i,
+                        i +
+                        FRAME_LOAD_CONCURRENCY
+                    );
+
+
+                await Promise.all(
+                    batch.map(
+                        frameId =>
+                            this.loadFrame(
+                                frameId
+                            )
+                    )
                 );
             }
 
 
-            console.log(
-                "[PerceptionReplay] CSV loaded:",
-                this.totalFrames,
-                "frames"
-            );
+            // -------------------------------------------------
+            // Release frames outside the rolling window.
+            // -------------------------------------------------
+
+            for (
+                const frameId
+                of Array.from(
+                    this.imageCache.keys()
+                )
+            ) {
+
+                if (
+                    !desired.has(frameId)
+                ) {
+
+                    this.releaseFrame(
+                        frameId
+                    );
+                }
+            }
+        }
+
+
+        // =====================================================
+        // Background rolling-window worker
+        //
+        // Runs continuously but does NOT render anything.
+        // =====================================================
+
+        async rollingLoader() {
+
+            if (
+                this.rollingLoaderRunning
+            ) {
+
+                return;
+            }
+
+            this.rollingLoaderRunning =
+                true;
+
+
+            while (
+                this.running
+            ) {
+
+                await this.maintainRollingWindow();
+
+
+                // Small pause before checking the
+                // new playback position.
+                await new Promise(
+                    resolve =>
+                        setTimeout(
+                            resolve,
+                            20
+                        )
+                );
+            }
+
+
+            this.rollingLoaderRunning =
+                false;
         }
 
 
         // =====================================================
         // Publish one frame
-        //
-        // IMPORTANT:
-        // There is NO fetch() here.
-        // There is NO createImageBitmap() here.
         // =====================================================
 
         async publishFrame() {
@@ -765,9 +874,42 @@
                 );
 
 
+            const frameId =
+                payload.frame_id;
+
+
             // -------------------------------------------------
-            // Attach the SAME four in-memory ImageBitmaps
-            // to every replay frame.
+            // Get decoded camera images.
+            //
+            // Normally this should already exist in memory.
+            //
+            // If it doesn't, wait for the loader.
+            // -------------------------------------------------
+
+            let assets =
+                this.imageCache.get(
+                    frameId
+                );
+
+
+            if (!assets) {
+
+                console.warn(
+                    "[Replay] Frame not ready:",
+                    frameId,
+                    "Waiting for decode..."
+                );
+
+
+                assets =
+                    await this.loadFrame(
+                        frameId
+                    );
+            }
+
+
+            // -------------------------------------------------
+            // Attach decoded images.
             // -------------------------------------------------
 
             for (
@@ -779,15 +921,15 @@
                     payload.cameras[
                         cameraName
                     ],
-                    this.memoryImages[
+                    assets[
                         cameraName
-                    ]
+                    ] || {}
                 );
             }
 
 
             // -------------------------------------------------
-            // Reset trajectory at beginning of replay.
+            // Reset trajectory at replay start.
             // -------------------------------------------------
 
             if (
@@ -800,7 +942,7 @@
 
 
             // -------------------------------------------------
-            // Dashboard
+            // Dashboard update
             // -------------------------------------------------
 
             if (
@@ -830,15 +972,22 @@
             ) {
 
                 console.log(
-                    "[MemoryTest] Published",
+                    "[Replay] Published",
                     this.frameCount,
                     "frames",
                     "(" +
-                    payload.frame_id +
-                    ")"
+                    frameId +
+                    ")",
+                    "| cache:",
+                    this.imageCache.size,
+                    "frames"
                 );
             }
 
+
+            // -------------------------------------------------
+            // Advance
+            // -------------------------------------------------
 
             this.rowIndex++;
 
@@ -849,23 +998,19 @@
             ) {
 
                 console.log(
-                    "[MemoryTest] Replay complete:",
+                    "[Replay] Replay complete:",
                     this.frameCount,
                     "frames"
                 );
 
-
-                this.rowIndex =
-                    0;
-
-                this.frameCount =
-                    0;
+                this.rowIndex = 0;
+                this.frameCount = 0;
             }
         }
 
 
         // =====================================================
-        // Replay
+        // Start replay
         // =====================================================
 
         async replay() {
@@ -883,35 +1028,71 @@
 
 
             console.log(
-                "[MemoryTest] Starting..."
+                "[Replay] Starting..."
+            );
+
+            console.log(
+                "[Replay] Target FPS:",
+                this.targetFps
+            );
+
+            console.log(
+                "[Replay] Rolling window:",
+                ROLLING_WINDOW_FRAMES,
+                "frames"
+            );
+
+            console.log(
+                "[Replay] Camera memory:",
+                ROLLING_WINDOW_FRAMES *
+                CAMERA_NAMES.length,
+                "ImageBitmaps maximum"
             );
 
 
             // -------------------------------------------------
-            // Load CSV first.
+            // Load CSV
             // -------------------------------------------------
 
             await this.loadCsv();
 
 
             // -------------------------------------------------
-            // IMPORTANT:
-            // Decode the four camera images BEFORE playback.
+            // Reset
             // -------------------------------------------------
 
-            await this.preloadCameraMemory();
+            this.rowIndex = 0;
+            this.frameCount = 0;
 
 
             // -------------------------------------------------
-            // Reset replay.
+            // Initial window
+            //
+            // We intentionally wait until the first rolling
+            // window is decoded before playback starts.
+            //
+            // This prevents the first several frames from
+            // competing with playback for image decoding.
             // -------------------------------------------------
 
-            this.rowIndex =
-                0;
+            console.log(
+                "[Replay] Preloading first",
+                ROLLING_WINDOW_FRAMES,
+                "frames..."
+            );
 
-            this.frameCount =
-                0;
 
+            await this.maintainRollingWindow();
+
+
+            console.log(
+                "[Replay] Initial camera buffer ready."
+            );
+
+
+            // -------------------------------------------------
+            // Tell dashboard dataset size.
+            // -------------------------------------------------
 
             if (
                 typeof window.updateDashboard ===
@@ -929,24 +1110,22 @@
             }
 
 
+            // -------------------------------------------------
+            // Start rolling background loader.
+            // -------------------------------------------------
+
+            this.rollingLoader();
+
+
+            // -------------------------------------------------
+            // 10 FPS = 100 ms/frame
+            // -------------------------------------------------
+
             const framePeriod =
                 this.targetFps > 0
                     ? 1000 /
                       this.targetFps
                     : 0;
-
-
-            console.log(
-                "[MemoryTest] Target:",
-                this.targetFps,
-                "FPS"
-            );
-
-            console.log(
-                "[MemoryTest] Frame period:",
-                framePeriod,
-                "ms"
-            );
 
 
             // -------------------------------------------------
@@ -964,7 +1143,7 @@
                     }
 
 
-                    const start =
+                    const startTime =
                         performance.now();
 
 
@@ -975,10 +1154,9 @@
                     } catch (error) {
 
                         console.error(
-                            "[MemoryTest]",
+                            "[Replay]",
                             error
                         );
-
 
                         this.stop();
 
@@ -996,7 +1174,7 @@
 
                     const elapsed =
                         performance.now() -
-                        start;
+                        startTime;
 
 
                     const delay =
@@ -1020,6 +1198,63 @@
 
 
         // =====================================================
+        // Load CSV
+        // =====================================================
+
+        async loadCsv() {
+
+            const response =
+                await fetch(
+                    this.csvPath,
+                    {
+                        cache:
+                            "no-store"
+                    }
+                );
+
+
+            if (!response.ok) {
+
+                throw new Error(
+                    "CSV not found: " +
+                    this.csvPath
+                );
+            }
+
+
+            const csvText =
+                await response.text();
+
+
+            this.rows =
+                this.parseCsv(
+                    csvText
+                );
+
+
+            this.totalFrames =
+                this.rows.length;
+
+
+            if (
+                this.totalFrames === 0
+            ) {
+
+                throw new Error(
+                    "CSV contains no data rows."
+                );
+            }
+
+
+            console.log(
+                "[Replay] CSV loaded:",
+                this.totalFrames,
+                "frames"
+            );
+        }
+
+
+        // =====================================================
         // Stop
         // =====================================================
 
@@ -1037,14 +1272,33 @@
                     this.timer
                 );
 
-
                 this.timer =
                     null;
             }
 
 
+            // -------------------------------------------------
+            // Release every decoded ImageBitmap.
+            // -------------------------------------------------
+
+            for (
+                const frameId
+                of Array.from(
+                    this.imageCache.keys()
+                )
+            ) {
+
+                this.releaseFrame(
+                    frameId
+                );
+            }
+
+
+            this.imageCache.clear();
+
+
             console.log(
-                "[MemoryTest] Stopped."
+                "[Replay] Stopped."
             );
         }
     }
@@ -1059,12 +1313,12 @@
 
 
     // =========================================================
-    // Start automatically
+    // Auto-start
     // =========================================================
 
     window.addEventListener(
         "load",
-        () => {
+        function () {
 
             const replay =
                 new PerceptionReplay();
