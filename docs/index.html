@@ -352,6 +352,7 @@ function updateDashboard(data){
     }
   }
   if(data.bev_objects){
+    bevStaticDirty = true;
     const activeIds = new Set(data.bev_objects.map(o => o.id));
     data.bev_objects.forEach(o => {
       if(!objTrails.has(o.id)) objTrails.set(o.id, []);
@@ -622,16 +623,68 @@ const cx=bev.width/2, cy=bev.height/2, maxR=115;
 const pxPerMeter = maxR / BEV_RANGE_M;
 let sweep=0;
 
-function drawBev(){
-  bctx.clearRect(0,0,bev.width,bev.height);
+// The grid + every object's comet-tail trail only actually change when new
+// data arrives (~10fps, driven by updateDashboard/replay.js). But this
+// whole function used to run on requestAnimationFrame at ~60fps and
+// redraw ALL of that from scratch every time -- including, per object,
+// up to 18 individual trail line segments each with their own state
+// changes. That's up to 6x more of the expensive part than the data ever
+// warrants, and it scales with however many objects are on screen.
+//
+// Fix: render the expensive "static" content (grid + objects + trails)
+// onto an offscreen canvas only when bevStaticDirty is set (i.e. when
+// updateDashboard actually touched bev_objects/trails). Every
+// requestAnimationFrame tick then just blits that cached bitmap (cheap)
+// and draws the animated sweep + ego marker on top (also cheap) -- so
+// the 60fps loop no longer does 60fps worth of trail math.
+const bevStatic = document.createElement('canvas');
+bevStatic.width = bev.width;
+bevStatic.height = bev.height;
+const bctxStatic = bevStatic.getContext('2d');
+let bevStaticDirty = true;
 
-  bctx.strokeStyle='rgba(255,255,255,0.06)';
-  for(let r=1;r<=3;r++){ bctx.beginPath(); bctx.arc(cx,cy,maxR*r/3,0,7); bctx.stroke(); }
+// The sweep gradient is identical every frame in its own (translated +
+// rotated) coordinate space -- no need to allocate a new one 60x/sec.
+const sweepGradient = bctx.createLinearGradient(0,0,maxR,0);
+sweepGradient.addColorStop(0,'rgba(77,238,220,0.22)');
+sweepGradient.addColorStop(1,'rgba(77,238,220,0)');
+
+function renderBevStatic(){
+  bctxStatic.clearRect(0,0,bevStatic.width,bevStatic.height);
+
+  bctxStatic.strokeStyle='rgba(255,255,255,0.06)';
+  for(let r=1;r<=3;r++){ bctxStatic.beginPath(); bctxStatic.arc(cx,cy,maxR*r/3,0,7); bctxStatic.stroke(); }
+
+  // world (+X forward, +Y left) -> screen: forward = up, left = left
+  const toScreen = (x,y) => ({ sx: cx + y*pxPerMeter, sy: cy - x*pxPerMeter });
+
+  state.bev_objects.forEach(o=>{
+    const col=classColors[o.cls];
+    const trail = objTrails.get(o.id) || [];
+    for(let i=1;i<trail.length;i++){
+      const a=toScreen(trail[i-1].x,trail[i-1].y), b=toScreen(trail[i].x,trail[i].y);
+      const t=i/trail.length;
+      bctxStatic.strokeStyle=col; bctxStatic.globalAlpha=t*0.5; bctxStatic.lineWidth=1+t*1.5;
+      bctxStatic.beginPath(); bctxStatic.moveTo(a.sx,a.sy); bctxStatic.lineTo(b.sx,b.sy); bctxStatic.stroke();
+    }
+    bctxStatic.globalAlpha=1;
+    const {sx,sy}=toScreen(o.x,o.y);
+    bctxStatic.fillStyle=col;
+    bctxStatic.beginPath(); bctxStatic.arc(sx,sy,4,0,7); bctxStatic.fill();
+  });
+
+  bevStaticDirty = false;
+}
+
+function drawBev(){
+  if (bevStaticDirty) renderBevStatic();
+
+  bctx.clearRect(0,0,bev.width,bev.height);
+  bctx.drawImage(bevStatic,0,0);
+
   sweep+=0.012;
   bctx.save(); bctx.translate(cx,cy); bctx.rotate(sweep);
-  const sg=bctx.createLinearGradient(0,0,maxR,0);
-  sg.addColorStop(0,'rgba(77,238,220,0.22)'); sg.addColorStop(1,'rgba(77,238,220,0)');
-  bctx.fillStyle=sg;
+  bctx.fillStyle=sweepGradient;
   bctx.beginPath(); bctx.moveTo(0,0); bctx.arc(0,0,maxR,-0.25,0.25); bctx.closePath(); bctx.fill();
   bctx.restore();
 
@@ -641,38 +694,6 @@ function drawBev(){
   bctx.fillStyle='#e7ebf0';
   bctx.beginPath(); bctx.moveTo(0,-9); bctx.lineTo(6,7); bctx.lineTo(-6,7); bctx.closePath(); bctx.fill();
   bctx.restore();
-
-  // world (+X forward, +Y left) -> screen: forward = up, left = left
-  // const toScreen = (x,y) => ({ sx: cx - y*pxPerMeter, sy: cy - x*pxPerMeter });
-  const toScreen = (x,y) => ({ sx: cx + y*pxPerMeter, sy: cy - x*pxPerMeter });
-
-  // function bevScale(d) {
-  //     const sign = Math.sign(d);
-  //     const r = Math.min(Math.abs(d), BEV_RANGE_M);
-
-  //     // Strong expansion near ego, strong compression far away
-  //     const normalized = r / BEV_RANGE_M;
-  //     const mapped = Math.pow(normalized, 0.50);
-
-  //     return sign * mapped * maxR;
-  // }
-
-  // const toScreen = (x, y) => ({sx: cx + bevScale(y), sy: cy - bevScale(x)});
-
-  state.bev_objects.forEach(o=>{
-    const col=classColors[o.cls];
-    const trail = objTrails.get(o.id) || [];
-    for(let i=1;i<trail.length;i++){
-      const a=toScreen(trail[i-1].x,trail[i-1].y), b=toScreen(trail[i].x,trail[i].y);
-      const t=i/trail.length;
-      bctx.strokeStyle=col; bctx.globalAlpha=t*0.5; bctx.lineWidth=1+t*1.5;
-      bctx.beginPath(); bctx.moveTo(a.sx,a.sy); bctx.lineTo(b.sx,b.sy); bctx.stroke();
-    }
-    bctx.globalAlpha=1;
-    const {sx,sy}=toScreen(o.x,o.y);
-    bctx.fillStyle=col;
-    bctx.beginPath(); bctx.arc(sx,sy,4,0,7); bctx.fill();
-  });
 
   requestAnimationFrame(drawBev);
 }
