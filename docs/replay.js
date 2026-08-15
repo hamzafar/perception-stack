@@ -41,7 +41,7 @@
 
 
     const DATASET_PATH =
-        "data";
+        "data_400x300";
 
 
     const TARGET_FPS =
