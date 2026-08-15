@@ -67,6 +67,23 @@
     const SUPPORTS_IMAGE_BITMAP =
         typeof createImageBitmap === "function";
 
+    // Decode each camera straight to roughly the size it's actually
+    // displayed at (see index.html: hero panel ~280px tall, thumbnail
+    // panels ~110px tall), doubled for screen sharpness. Source dashcam
+    // frames are commonly 720p-4K; decoding (and holding in memory) at
+    // full resolution when only a few hundred pixels ever get drawn is
+    // what causes the periodic GC stalls -- every frame allocates and
+    // frees several megapixels of bitmap data for nothing. Only
+    // resizeHeight is given so the browser preserves aspect ratio
+    // automatically (no image distortion, and bounding-box overlays
+    // stay correct since they're fraction-of-image based).
+    const CAMERA_RESIZE_HEIGHT = {
+        front: 560,
+        left: 220,
+        rear: 220,
+        right: 220
+    };
+
 
     // =========================================================
     // PerceptionReplay
@@ -511,10 +528,21 @@
 
             if (SUPPORTS_IMAGE_BITMAP) {
 
+                const targetHeight =
+                    CAMERA_RESIZE_HEIGHT[
+                        cameraName
+                    ];
+
+
                 const bitmap =
-                    await createImageBitmap(
-                        blob
-                    );
+                    targetHeight
+                        ? await createImageBitmap(
+                              blob,
+                              { resizeHeight: targetHeight }
+                          )
+                        : await createImageBitmap(
+                              blob
+                          );
 
 
                 return { bitmap };
