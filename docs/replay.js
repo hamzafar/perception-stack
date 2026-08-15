@@ -46,7 +46,7 @@
 
     const DATASET_PATH = "data";
 
-    const TARGET_FPS = 10.0;
+    const TARGET_FPS = 5.0;
 
     const PRINT_EVERY = 50;
 
@@ -65,7 +65,7 @@
     // opportunistically with limited concurrency (FAR_FETCH_CONCURRENCY)
     // so it can absorb network hiccups / bandwidth spikes without ever
     // crowding out the near tier. Safe to set large.
-    const NEAR_PREFETCH_AHEAD = 8;
+    const NEAR_PREFETCH_AHEAD = 10;
 
     const FAR_PREFETCH_AHEAD = 20;
 
