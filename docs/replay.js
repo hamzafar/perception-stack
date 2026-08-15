@@ -619,34 +619,61 @@
 
         // =====================================================
         // Load all four camera assets for one frame
+        //
+        // Uses allSettled rather than Promise.all: if one camera's
+        // image is missing/corrupt/a network blip, the other three
+        // that succeeded are still used. A single bad file for a
+        // single camera on a single frame should degrade that one
+        // camera's panel for that one frame, not take down the whole
+        // frame (or, further up the call chain, the whole replay).
         // =====================================================
 
         async loadFrameAssets(frameId) {
 
-            const entries =
-                await Promise.all(
+            const results =
+                await Promise.allSettled(
 
                     CAMERA_NAMES.map(
-                        async cameraName => [
-                            cameraName,
-                            await this.loadCameraAsset(
+                        cameraName =>
+                            this.loadCameraAsset(
                                 cameraName,
                                 frameId
                             )
-                        ]
                     )
                 );
 
 
             const assets = {};
 
-            for (
-                const [name, asset]
-                of entries
-            ) {
+            results.forEach(
+                (result, i) => {
 
-                assets[name] = asset;
-            }
+                    const cameraName =
+                        CAMERA_NAMES[i];
+
+
+                    if (result.status === "fulfilled") {
+
+                        assets[cameraName] =
+                            result.value;
+
+                    } else {
+
+                        assets[cameraName] = {};
+
+
+                        console.warn(
+                            "[PerceptionReplay] " +
+                            cameraName +
+                            " image failed for " +
+                            frameId +
+                            " -- showing placeholder " +
+                            "for this camera/frame only.",
+                            result.reason
+                        );
+                    }
+                }
+            );
 
 
             return assets;
@@ -1146,10 +1173,48 @@
                 payload.frame_id;
 
 
-            const assets =
-                await this.getOrLoadFrameAssets(
-                    frameId
+            // Defense in depth: loadFrameAssets() above already
+            // degrades gracefully per-camera, but if getting assets
+            // fails entirely for some other reason (e.g. this exact
+            // frame's shared in-flight fetch was rejected by something
+            // unexpected), fall back to placeholders for the whole
+            // frame instead of throwing -- one bad frame should never
+            // be able to kill the entire replay loop. Before this,
+            // any single failed image request anywhere in the dataset
+            // would permanently stop playback (this.stop() gets
+            // called from the loop's catch), which looked like the
+            // player "hanging" for good, at the same frame every time.
+            let assets;
+
+            try {
+
+                assets =
+                    await this.getOrLoadFrameAssets(
+                        frameId
+                    );
+
+            } catch (error) {
+
+                console.warn(
+                    "[PerceptionReplay] " +
+                    "Failed to load images for " +
+                    frameId +
+                    " -- continuing with placeholders " +
+                    "for this frame only.",
+                    error
                 );
+
+
+                assets = {};
+
+                for (
+                    const cameraName
+                    of CAMERA_NAMES
+                ) {
+
+                    assets[cameraName] = {};
+                }
+            }
 
 
             for (
