@@ -43,7 +43,7 @@
 
 
     const CSV_PATH =
-        "data/perception-org.csv";
+        "data/perception.csv";
 
 
     const DATASET_PATH =
@@ -80,7 +80,7 @@
     // ---------------------------------------------------------
 
     const FRAME_LOAD_CONCURRENCY =
-        12;
+        8;
 
 
     // =========================================================
