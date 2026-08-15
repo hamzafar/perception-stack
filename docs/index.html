@@ -316,12 +316,20 @@ function updateDashboard(data){
     if(egoTrail.length > EGO_TRAIL_MAX) egoTrail.shift();
   }
   if(data.bev_objects){
+    const activeIds = new Set(data.bev_objects.map(o => o.id));
     data.bev_objects.forEach(o => {
       if(!objTrails.has(o.id)) objTrails.set(o.id, []);
       const t = objTrails.get(o.id);
       t.push({x:o.x, y:o.y});
       if(t.length > OBJ_TRAIL_MAX) t.shift();
     });
+    // bev_objects is a full replacement list every frame (see schema
+    // comment above), so any id NOT in it has left the scene -- drop its
+    // trail now instead of holding onto every id ever seen for the whole
+    // session. Without this, objTrails grows for as long as replay runs.
+    for(const id of objTrails.keys()){
+      if(!activeIds.has(id)) objTrails.delete(id);
+    }
   }
 
   if(data.cameras) renderCameras();
