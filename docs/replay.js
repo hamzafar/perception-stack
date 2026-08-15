@@ -67,7 +67,7 @@
     // crowding out the near tier. Safe to set large.
     const NEAR_PREFETCH_AHEAD = 4;
 
-    const FAR_PREFETCH_AHEAD = 16;
+    const FAR_PREFETCH_AHEAD = 4;
 
     const FAR_FETCH_CONCURRENCY = 2;
 
