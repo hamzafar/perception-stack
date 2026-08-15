@@ -67,13 +67,13 @@
     // crowding out the near tier. Safe to set large.
     const NEAR_PREFETCH_AHEAD = 10;
 
-    const FAR_PREFETCH_AHEAD = 20;
+    const FAR_PREFETCH_AHEAD = 15;
 
-    const FAR_FETCH_CONCURRENCY = 4;
+    const FAR_FETCH_CONCURRENCY = 5;
 
     // Max number of frames' worth of decoded images kept in memory at once.
     // Bounds memory use regardless of dataset size / how long replay runs.
-    const CACHE_MAX_FRAMES = 24;
+    const CACHE_MAX_FRAMES = 20;
 
     // createImageBitmap decodes off the main thread and avoids the base64
     // round-trip entirely. Fall back to the old base64 <img> path only on
