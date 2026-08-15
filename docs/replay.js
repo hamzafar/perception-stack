@@ -55,11 +55,11 @@
     // of blocking each frame -- it's the fix for the "slow on first loop"
     // symptom (nothing was ever pre-loaded before, so every frame stalled on
     // a cold fetch).
-    const PREFETCH_AHEAD = 10;
+    const PREFETCH_AHEAD = 40;
 
     // Max number of frames' worth of decoded images kept in memory at once.
     // Bounds memory use regardless of dataset size / how long replay runs.
-    const CACHE_MAX_FRAMES = 16;
+    const CACHE_MAX_FRAMES = 40;
 
     // createImageBitmap decodes off the main thread and avoids the base64
     // round-trip entirely. Fall back to the old base64 <img> path only on
