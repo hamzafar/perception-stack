@@ -337,7 +337,17 @@ function updateDashboard(data){
      data.objects_count || data.gpu_pct!==undefined || data.cpu_pct!==undefined) renderHeader();
   // if(data.frame_id !== undefined) {renderFooter();}
   if(data.frame_id !== undefined) {renderFooter();renderReplayProgress();}
-  if(data.ego) renderEgoPanel();
+  if(data.ego) {
+    renderEgoPanel();
+    if(data.ego.world_x !== undefined || data.ego.world_y !== undefined) {
+      drawTraj();
+    }
+  }
+
+  if(data.bev_objects) {
+    drawBev();
+  }
+
   if(data.nearest_objects) renderNearestList();
 }
 window.updateDashboard = updateDashboard;
@@ -590,57 +600,65 @@ function drawBev(){
   bctx.clearRect(0,0,bev.width,bev.height);
 
   bctx.strokeStyle='rgba(255,255,255,0.06)';
-  for(let r=1;r<=3;r++){ bctx.beginPath(); bctx.arc(cx,cy,maxR*r/3,0,7); bctx.stroke(); }
-  sweep+=0.012;
-  bctx.save(); bctx.translate(cx,cy); bctx.rotate(sweep);
-  const sg=bctx.createLinearGradient(0,0,maxR,0);
-  sg.addColorStop(0,'rgba(77,238,220,0.22)'); sg.addColorStop(1,'rgba(77,238,220,0)');
-  bctx.fillStyle=sg;
-  bctx.beginPath(); bctx.moveTo(0,0); bctx.arc(0,0,maxR,-0.25,0.25); bctx.closePath(); bctx.fill();
-  bctx.restore();
+  for(let r=1;r<=3;r++){
+    bctx.beginPath();
+    bctx.arc(cx,cy,maxR*r/3,0,7);
+    bctx.stroke();
+  }
 
-  // const heading = state.ego.heading_deg * Math.PI/180;
   const heading = 0;
-  bctx.save(); bctx.translate(cx,cy); bctx.rotate(heading);
+
+  bctx.save();
+  bctx.translate(cx,cy);
+  bctx.rotate(heading);
   bctx.fillStyle='#e7ebf0';
-  bctx.beginPath(); bctx.moveTo(0,-9); bctx.lineTo(6,7); bctx.lineTo(-6,7); bctx.closePath(); bctx.fill();
+  bctx.beginPath();
+  bctx.moveTo(0,-9);
+  bctx.lineTo(6,7);
+  bctx.lineTo(-6,7);
+  bctx.closePath();
+  bctx.fill();
   bctx.restore();
 
-  // world (+X forward, +Y left) -> screen: forward = up, left = left
-  // const toScreen = (x,y) => ({ sx: cx - y*pxPerMeter, sy: cy - x*pxPerMeter });
-  const toScreen = (x,y) => ({ sx: cx + y*pxPerMeter, sy: cy - x*pxPerMeter });
-
-  // function bevScale(d) {
-  //     const sign = Math.sign(d);
-  //     const r = Math.min(Math.abs(d), BEV_RANGE_M);
-
-  //     // Strong expansion near ego, strong compression far away
-  //     const normalized = r / BEV_RANGE_M;
-  //     const mapped = Math.pow(normalized, 0.50);
-
-  //     return sign * mapped * maxR;
-  // }
-
-  // const toScreen = (x, y) => ({sx: cx + bevScale(y), sy: cy - bevScale(x)});
-
-  state.bev_objects.forEach(o=>{
-    const col=classColors[o.cls];
-    const trail = objTrails.get(o.id) || [];
-    for(let i=1;i<trail.length;i++){
-      const a=toScreen(trail[i-1].x,trail[i-1].y), b=toScreen(trail[i].x,trail[i].y);
-      const t=i/trail.length;
-      bctx.strokeStyle=col; bctx.globalAlpha=t*0.5; bctx.lineWidth=1+t*1.5;
-      bctx.beginPath(); bctx.moveTo(a.sx,a.sy); bctx.lineTo(b.sx,b.sy); bctx.stroke();
-    }
-    bctx.globalAlpha=1;
-    const {sx,sy}=toScreen(o.x,o.y);
-    bctx.fillStyle=col;
-    bctx.beginPath(); bctx.arc(sx,sy,4,0,7); bctx.fill();
+  // world (+X forward, +Y left) -> screen:
+  // forward = up, left = left
+  const toScreen = (x,y) => ({
+    sx: cx + y*pxPerMeter,
+    sy: cy - x*pxPerMeter
   });
 
-  requestAnimationFrame(drawBev);
+  state.bev_objects.forEach(o=>{
+    const col=classColors[o.cls] || '#4DEEDC';
+    const trail = objTrails.get(o.id) || [];
+
+    for(let i=1;i<trail.length;i++){
+      const a=toScreen(trail[i-1].x,trail[i-1].y);
+      const b=toScreen(trail[i].x,trail[i].y);
+      const t=i/trail.length;
+
+      bctx.strokeStyle=col;
+      bctx.globalAlpha=t*0.5;
+      bctx.lineWidth=1+t*1.5;
+
+      bctx.beginPath();
+      bctx.moveTo(a.sx,a.sy);
+      bctx.lineTo(b.sx,b.sy);
+      bctx.stroke();
+    }
+
+    bctx.globalAlpha=1;
+
+    const {sx,sy}=toScreen(o.x,o.y);
+
+    bctx.fillStyle=col;
+    bctx.beginPath();
+    bctx.arc(sx,sy,4,0,7);
+    bctx.fill();
+  });
+
+  bctx.globalAlpha=1;
 }
-drawBev();
+
 
 // ---- trajectory inset: auto-fit view of ego's full path (client-side
 // egoTrail, fed by ego.world_x/world_y) ----
@@ -648,40 +666,87 @@ const traj=document.getElementById('traj');
 const tctx=traj.getContext('2d');
 function drawTraj(){
   tctx.clearRect(0,0,traj.width,traj.height);
+
   const pts=egoTrail;
-  if(pts.length<2){ requestAnimationFrame(drawTraj); return; }
+
+  if(pts.length<2){
+    return;
+  }
 
   const pad=12;
-  const xs=pts.map(p=>p.x), ys=pts.map(p=>p.y);
-  const minX=Math.min(...xs), maxX=Math.max(...xs);
-  const minY=Math.min(...ys), maxY=Math.max(...ys);
-  const spanX=Math.max(maxX-minX,1), spanY=Math.max(maxY-minY,1);
-  const scale=Math.min((traj.width-pad*2)/spanX,(traj.height-pad*2)/spanY);
-  const midX=(minX+maxX)/2, midY=(minY+maxY)/2;
-  // const toPx=(p)=>({x:traj.width/2+(p.x-midX)*scale, y:traj.height/2+(p.y-midY)*scale});
-  const toPx = (p) => ({x: traj.width / 2 + (p.x - midX) * scale, y: traj.height / 2 - (p.y - midY) * scale});
+
+  let minX=Infinity;
+  let maxX=-Infinity;
+  let minY=Infinity;
+  let maxY=-Infinity;
+
+  for(const p of pts){
+    if(p.x < minX) minX=p.x;
+    if(p.x > maxX) maxX=p.x;
+    if(p.y < minY) minY=p.y;
+    if(p.y > maxY) maxY=p.y;
+  }
+
+  const spanX=Math.max(maxX-minX,1);
+  const spanY=Math.max(maxY-minY,1);
+
+  const scale=Math.min(
+    (traj.width-pad*2)/spanX,
+    (traj.height-pad*2)/spanY
+  );
+
+  const midX=(minX+maxX)/2;
+  const midY=(minY+maxY)/2;
+
+  const toPx = (p) => ({
+    x: traj.width/2 + (p.x-midX)*scale,
+    y: traj.height/2 - (p.y-midY)*scale
+  });
 
   for(let i=1;i<pts.length;i++){
-    const a=toPx(pts[i-1]), b=toPx(pts[i]);
+    const a=toPx(pts[i-1]);
+    const b=toPx(pts[i]);
     const t=i/pts.length;
-    tctx.strokeStyle='#4DEEDC'; tctx.globalAlpha=0.25+t*0.5; tctx.lineWidth=1+t*1.2;
-    tctx.beginPath(); tctx.moveTo(a.x,a.y); tctx.lineTo(b.x,b.y); tctx.stroke();
+
+    tctx.strokeStyle='#4DEEDC';
+    tctx.globalAlpha=0.25+t*0.5;
+    tctx.lineWidth=1+t*1.2;
+
+    tctx.beginPath();
+    tctx.moveTo(a.x,a.y);
+    tctx.lineTo(b.x,b.y);
+    tctx.stroke();
   }
+
   tctx.globalAlpha=1;
 
   const start=toPx(pts[0]);
+
   tctx.fillStyle='#5a6270';
-  tctx.beginPath(); tctx.arc(start.x,start.y,2,0,7); tctx.fill();
+  tctx.beginPath();
+  tctx.arc(start.x,start.y,2,0,7);
+  tctx.fill();
 
   const cur=toPx(pts[pts.length-1]);
-  const heading = state.ego.heading_deg * Math.PI/180;
-  tctx.save(); tctx.translate(cur.x,cur.y); tctx.rotate(heading);
+  const heading=state.ego.heading_deg*Math.PI/180;
+
+  tctx.save();
+  tctx.translate(cur.x,cur.y);
+  tctx.rotate(heading);
   tctx.fillStyle='#e7ebf0';
-  tctx.beginPath(); tctx.moveTo(0,-5); tctx.lineTo(3.5,4); tctx.lineTo(-3.5,4); tctx.closePath(); tctx.fill();
+  tctx.beginPath();
+  tctx.moveTo(0,-5);
+  tctx.lineTo(3.5,4);
+  tctx.lineTo(-3.5,4);
+  tctx.closePath();
+  tctx.fill();
   tctx.restore();
 
-  requestAnimationFrame(drawTraj);
+  tctx.globalAlpha=1;
 }
+
+// Initial empty-state render only; subsequent renders are data-driven.
+drawBev();
 drawTraj();
 </script>
 <script src="replay.js"></script>
