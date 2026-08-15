@@ -55,7 +55,7 @@
     // of blocking each frame -- it's the fix for the "slow on first loop"
     // symptom (nothing was ever pre-loaded before, so every frame stalled on
     // a cold fetch).
-    const PREFETCH_AHEAD = 8;
+    const PREFETCH_AHEAD = 10;
 
     // Max number of frames' worth of decoded images kept in memory at once.
     // Bounds memory use regardless of dataset size / how long replay runs.
