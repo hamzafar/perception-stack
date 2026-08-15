@@ -96,8 +96,11 @@
 
             this.timer = null;
 
-            // frameId -> { front:{bitmap|image}, rear:{...}, left:{...}, right:{...} }
-            // or the sentinel string "pending" while a fetch is in flight.
+            // frameId -> resolved { front:{bitmap|image}, rear:{...}, ... }
+            // or, while a fetch is in flight, the in-flight Promise itself.
+            // Storing the Promise (not just a "pending" flag) lets any
+            // caller that asks for the same frame concurrently share that
+            // one fetch instead of triggering a duplicate one.
             this.imageCache = new Map();
 
             this.prefetchAhead = PREFETCH_AHEAD;
@@ -654,27 +657,86 @@
         }
 
 
-        // Release an entry's decoded bitmaps and drop it from the cache.
-        evictFrame(frameId) {
+        // Get this frame's camera assets, sharing an in-flight fetch with
+        // any other caller (prefetcher + playback loop) asking for the
+        // same frame at the same time, instead of double-fetching it.
+        getOrLoadFrameAssets(frameId) {
 
-            const assets =
+            const entry =
                 this.imageCache.get(
                     frameId
                 );
 
 
-            this.imageCache.delete(
-                frameId
+            if (entry) {
+
+                // Already resolved -> wrap in a Promise.
+                // Still loading -> entry IS the Promise; return it as-is
+                // so the caller awaits the same fetch.
+                return typeof entry.then === "function"
+                    ? entry
+                    : Promise.resolve(entry);
+            }
+
+
+            const loadPromise =
+                this.loadFrameAssets(frameId)
+                    .then(assets => {
+
+                        this.imageCache.set(
+                            frameId,
+                            assets
+                        );
+
+                        return assets;
+                    })
+                    .catch(error => {
+
+                        this.imageCache.delete(
+                            frameId
+                        );
+
+                        throw error;
+                    });
+
+
+            this.imageCache.set(
+                frameId,
+                loadPromise
             );
 
 
+            return loadPromise;
+        }
+
+
+        // Release an entry's decoded bitmaps and drop it from the cache.
+        // No-ops on entries that are still in-flight Promises -- those
+        // will simply be considered for eviction again on a later pass
+        // once they've resolved.
+        evictFrame(frameId) {
+
+            const entry =
+                this.imageCache.get(
+                    frameId
+                );
+
+
+            if (!entry) return;
+
+
             if (
-                !assets ||
-                assets === "pending"
+                typeof entry.then
+                    === "function"
             ) {
 
                 return;
             }
+
+
+            this.imageCache.delete(
+                frameId
+            );
 
 
             for (
@@ -683,7 +745,7 @@
             ) {
 
                 const asset =
-                    assets[cameraName];
+                    entry[cameraName];
 
 
                 if (
@@ -747,6 +809,12 @@
         // decoded and ready in this.imageCache. Runs concurrently with
         // the playback loop so publishFrame() essentially never has to
         // wait on the network once the window has filled in.
+        //
+        // All frames in the window are dispatched together (not one
+        // frame fully finished before the next starts) so real network
+        // round-trip latency is paid once, in parallel, rather than
+        // once per frame in series -- this matters a lot more on a real
+        // connection (e.g. github.io) than on localhost.
         // =====================================================
 
         async runPrefetcher() {
@@ -762,6 +830,8 @@
             ) {
 
                 const keep = new Set();
+
+                const inFlight = [];
 
 
                 for (
@@ -788,83 +858,25 @@
                     keep.add(frameId);
 
 
-                    if (
-                        this.imageCache.has(
+                    inFlight.push(
+                        this.getOrLoadFrameAssets(
                             frameId
-                        )
-                    ) {
+                        ).catch(error => {
 
-                        continue;
-                    }
-
-
-                    this.imageCache.set(
-                        frameId,
-                        "pending"
+                            console.warn(
+                                "[PerceptionReplay] " +
+                                "Prefetch failed for " +
+                                frameId,
+                                error
+                            );
+                        })
                     );
-
-
-                    try {
-
-                        const assets =
-                            await this.loadFrameAssets(
-                                frameId
-                            );
-
-
-                        if (!this.running) {
-
-                            // Replay was stopped mid-fetch: release
-                            // what we just decoded instead of caching it.
-                            for (
-                                const cameraName
-                                of CAMERA_NAMES
-                            ) {
-
-                                const a =
-                                    assets[cameraName];
-
-
-                                if (
-                                    a &&
-                                    a.bitmap &&
-                                    typeof a.bitmap.close
-                                        === "function"
-                                ) {
-
-                                    a.bitmap.close();
-                                }
-                            }
-
-
-                            this.imageCache.delete(
-                                frameId
-                            );
-
-                            break;
-                        }
-
-
-                        this.imageCache.set(
-                            frameId,
-                            assets
-                        );
-
-                    } catch (error) {
-
-                        this.imageCache.delete(
-                            frameId
-                        );
-
-
-                        console.warn(
-                            "[PerceptionReplay] " +
-                            "Prefetch failed for " +
-                            frameId,
-                            error
-                        );
-                    }
                 }
+
+
+                await Promise.allSettled(
+                    inFlight
+                );
 
 
                 this.pruneCache(keep);
@@ -978,39 +990,22 @@
 
 
             // -------------------------------------------------
-            // Grab this frame's camera images from the prefetch
-            // cache (should already be warm); fall back to a
-            // direct load on a cache miss so playback never
-            // deadlocks (e.g. the very first frame, before the
-            // prefetcher has had a chance to run).
+            // Grab this frame's camera images. Normally this is
+            // already warm from the prefetcher; on a cache miss (e.g.
+            // frame 0, before the prefetcher has gotten anywhere) or
+            // while the prefetcher's fetch for this exact frame is
+            // still in flight, this awaits that SAME fetch rather than
+            // starting a second, duplicate one.
             // -------------------------------------------------
 
             const frameId =
                 payload.frame_id;
 
 
-            let assets =
-                this.imageCache.get(
+            const assets =
+                await this.getOrLoadFrameAssets(
                     frameId
                 );
-
-
-            if (
-                !assets ||
-                assets === "pending"
-            ) {
-
-                assets =
-                    await this.loadFrameAssets(
-                        frameId
-                    );
-
-
-                this.imageCache.set(
-                    frameId,
-                    assets
-                );
-            }
 
 
             for (
