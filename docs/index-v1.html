@@ -391,21 +391,69 @@ function drawCam(id, cameraData, big) {
 
   const ctx = canvas.getContext('2d');
 
-  if (cameraData.bitmap) {
+  // ctx.fillStyle = '#0b0e12';
+  // ctx.fillRect(0,0,canvas.width,canvas.height);
 
-    // Preferred path: replay.js already handed us a decoded ImageBitmap
-    // (via createImageBitmap), so this is a direct, synchronous draw —
-    // no per-frame base64 decode, no new Image() allocation.
-    drawFrameImage(ctx, canvas, cameraData.bitmap, cameraData.boxes, big);
+  if (cameraData.image) {
 
-  } else if (cameraData.image) {
-
-    // Legacy fallback path, only used by replay.js on browsers without
-    // createImageBitmap support.
     const img = new Image();
+
     img.onload = function () {
-      drawFrameImage(ctx, canvas, img, cameraData.boxes, big);
+
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      // ctx.fillStyle = '#0b0e12';
+      // ctx.fillRect(0,0,canvas.width,canvas.height);
+      // Keep the original camera aspect ratio.
+      // Use CONTAIN rather than COVER so the full image remains visible
+      // and is centered inside the hero panel.
+      const scale = Math.min(
+        canvas.width / img.width,
+        canvas.height / img.height
+      );
+
+      const dw = img.width * scale;
+      const dh = img.height * scale;
+
+      const dx = (canvas.width - dw) / 2;
+      const dy = (canvas.height - dh) / 2;
+
+      ctx.drawImage(img, dx, dy, dw, dh);
+      (cameraData.boxes || []).forEach(b => {
+
+        const [cx, cy, bw, bh] = b.box;
+
+        // Normalized coordinates → original image pixels
+        const x = (cx - bw / 2) * img.width;
+        const y = (cy - bh / 2) * img.height;
+        const w = bw * img.width;
+        const h = bh * img.height;
+
+        // Original image pixels → displayed canvas pixels
+        const drawX = dx + x * scale;
+        const drawY = dy + y * scale;
+        const drawW = w * scale;
+        const drawH = h * scale;
+
+        const col = classColors[b.cls] || '#4DEEDC';
+
+        ctx.strokeStyle = col;
+        ctx.lineWidth = big ? 2 : 1.5;
+        ctx.strokeRect(drawX, drawY, drawW, drawH);
+
+        ctx.fillStyle = col;
+        ctx.font = `${big ? 11 : 9}px IBM Plex Mono`;
+
+        const label = `#${b.id} ${b.cls} ${(b.conf || 0).toFixed(2)}`;
+
+        ctx.fillText(
+          label,
+          drawX,
+          Math.max(12, drawY - 4)
+        );
+      });
+
     };
+
     img.src = 'data:image/jpeg;base64,' + cameraData.image;
 
   } else {
@@ -417,61 +465,6 @@ function drawCam(id, cameraData, big) {
       sceneVariants[id]
     );
   }
-}
-
-function drawFrameImage(ctx, canvas, img, boxes, big) {
-
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-
-  // Keep the original camera aspect ratio.
-  // Use CONTAIN rather than COVER so the full image remains visible
-  // and is centered inside the hero panel.
-  const scale = Math.min(
-    canvas.width / img.width,
-    canvas.height / img.height
-  );
-
-  const dw = img.width * scale;
-  const dh = img.height * scale;
-
-  const dx = (canvas.width - dw) / 2;
-  const dy = (canvas.height - dh) / 2;
-
-  ctx.drawImage(img, dx, dy, dw, dh);
-
-  (boxes || []).forEach(b => {
-
-    const [cx, cy, bw, bh] = b.box;
-
-    // Normalized coordinates → original image pixels
-    const x = (cx - bw / 2) * img.width;
-    const y = (cy - bh / 2) * img.height;
-    const w = bw * img.width;
-    const h = bh * img.height;
-
-    // Original image pixels → displayed canvas pixels
-    const drawX = dx + x * scale;
-    const drawY = dy + y * scale;
-    const drawW = w * scale;
-    const drawH = h * scale;
-
-    const col = classColors[b.cls] || '#4DEEDC';
-
-    ctx.strokeStyle = col;
-    ctx.lineWidth = big ? 2 : 1.5;
-    ctx.strokeRect(drawX, drawY, drawW, drawH);
-
-    ctx.fillStyle = col;
-    ctx.font = `${big ? 11 : 9}px IBM Plex Mono`;
-
-    const label = `#${b.id} ${b.cls} ${(b.conf || 0).toFixed(2)}`;
-
-    ctx.fillText(
-      label,
-      drawX,
-      Math.max(12, drawY - 4)
-    );
-  });
 }
 function renderCameras() {
   drawCam('cam-hero', state.cameras.front, true);

@@ -1,31 +1,29 @@
 /*
  * replay.js
- * ============================================================
- * Browser-based equivalent of Python PerceptionReplay.
  *
- * Data:
+ * Browser equivalent of the Python PerceptionReplay.
  *
- *   data/perception.csv
- *   data/front/frame_000001.jpg
- *   data/rear/frame_000001.jpg
- *   data/left/frame_000001.jpg
- *   data/right/frame_000001.jpg
+ * Expected structure:
  *
- * Dashboard:
+ * docs/
+ * ├── index.html
+ * ├── replay.js
+ * └── data/
+ *     ├── perception.csv
+ *     ├── front/
+ *     │   ├── frame_000001.jpg
+ *     │   └── ...
+ *     ├── rear/
+ *     ├── left/
+ *     └── right/
  *
- *   window.updateDashboard(payload)
+ * The existing dashboard must provide:
  *
- * Features:
- *   - CSV replay
- *   - 10 FPS target
- *   - 40-frame look-ahead preload
- *   - rolling image cache
- *   - automatic looping
- *   - trajectory reset
- *   - replay progress
- *   - logging every 50 frames
- *   - no external libraries
- * ============================================================
+ *     window.updateDashboard(payload)
+ *
+ * No Python.
+ * No WebSocket.
+ * No external libraries.
  */
 
 (function () {
@@ -44,35 +42,30 @@
         "right"
     ];
 
-    const CSV_PATH =
-        "data/perception.csv";
+    const CSV_PATH = "data/perception.csv";
 
-    const DATASET_PATH =
-        "data";
+    const DATASET_PATH = "data";
 
-    const TARGET_FPS =
-        10.0;
+    const TARGET_FPS = 10.0;
 
-    const PRINT_EVERY =
-        50;
+    const PRINT_EVERY = 50;
 
-    /*
-     * Number of future frames to preload.
-     *
-     * 40 frames at 10 FPS = 4 seconds
-     * of look-ahead.
-     */
-    const PRELOAD_AHEAD =
-        20;
+    // How many frames ahead of the playhead to decode in the background.
+    // This is what hides network/decode latency behind playback time instead
+    // of blocking each frame -- it's the fix for the "slow on first loop"
+    // symptom (nothing was ever pre-loaded before, so every frame stalled on
+    // a cold fetch).
+    const PREFETCH_AHEAD = 8;
 
-    /*
-     * Number of previous frames to keep.
-     *
-     * This prevents the JavaScript cache from
-     * growing indefinitely.
-     */
-    const CACHE_BEHIND =
-        5;
+    // Max number of frames' worth of decoded images kept in memory at once.
+    // Bounds memory use regardless of dataset size / how long replay runs.
+    const CACHE_MAX_FRAMES = 16;
+
+    // createImageBitmap decodes off the main thread and avoids the base64
+    // round-trip entirely. Fall back to the old base64 <img> path only on
+    // browsers that don't support it.
+    const SUPPORTS_IMAGE_BITMAP =
+        typeof createImageBitmap === "function";
 
 
     // =========================================================
@@ -83,77 +76,41 @@
 
         constructor() {
 
-            this.csvPath =
-                CSV_PATH;
+            this.csvPath = CSV_PATH;
 
-            this.datasetPath =
-                DATASET_PATH;
+            this.datasetPath = DATASET_PATH;
 
-            this.targetFps =
-                TARGET_FPS;
+            this.targetFps = TARGET_FPS;
 
-            this.printEvery =
-                PRINT_EVERY;
+            this.printEvery = PRINT_EVERY;
 
-            this.preloadAhead =
-                PRELOAD_AHEAD;
+            this.frameCount = 0;
 
-            this.cacheBehind =
-                CACHE_BEHIND;
-
-
-            // -------------------------------------------------
-            // Replay state
-            // -------------------------------------------------
+            this.totalFrames = 0;
 
             this.rows = [];
 
-            this.totalFrames =
-                0;
+            this.rowIndex = 0;
 
-            this.rowIndex =
-                0;
+            this.running = false;
 
-            this.frameCount =
-                0;
+            this.timer = null;
 
-            this.running =
-                false;
+            // frameId -> { front:{bitmap|image}, rear:{...}, left:{...}, right:{...} }
+            // or the sentinel string "pending" while a fetch is in flight.
+            this.imageCache = new Map();
 
-            this.timer =
-                null;
+            this.prefetchAhead = PREFETCH_AHEAD;
 
+            this.cacheMax = CACHE_MAX_FRAMES;
 
-            // -------------------------------------------------
-            // Rolling image cache
-            //
-            // key:
-            //
-            //     front/frame_000001
-            //
-            // value:
-            //
-            //     Promise -> Base64 JPEG
-            //
-            // IMPORTANT:
-            // This cache is deliberately bounded.
-            // -------------------------------------------------
-
-            this.imageCache =
-                new Map();
-
-
-            /*
-             * Tracks frame indices whose preload
-             * operation has already been scheduled.
-             */
-            this.preloadingIndexes =
-                new Set();
+            this.prefetchRunning = false;
         }
 
 
         // =====================================================
         // Decode CSV value
+        // Equivalent to Python json.loads()
         // =====================================================
 
         decodeCsvValue(value) {
@@ -163,16 +120,12 @@
                 value === null ||
                 value === ""
             ) {
-
                 return value;
             }
 
-
             try {
 
-                return JSON.parse(
-                    value
-                );
+                return JSON.parse(value);
 
             } catch (error) {
 
@@ -184,7 +137,9 @@
         // =====================================================
         // CSV parser
         //
-        // Supports quoted JSON containing commas.
+        // Important:
+        // Your CSV contains JSON fields with commas, therefore
+        // a simple split(",") cannot be used.
         // =====================================================
 
         parseCsv(text) {
@@ -204,25 +159,19 @@
                 i++
             ) {
 
-                const character =
-                    text[i];
+                const character = text[i];
 
 
-                // -------------------------------------------------
-                // Inside quoted field
-                // -------------------------------------------------
+                // ---------------------------------------------
+                // Inside quoted CSV field
+                // ---------------------------------------------
 
                 if (quoted) {
 
-                    if (
-                        character === '"'
-                    ) {
+                    if (character === '"') {
 
-                        /*
-                         * CSV escaped quote:
-                         *
-                         * ""
-                         */
+                        // CSV escaped quote:
+                        // ""
                         if (
                             text[i + 1] === '"'
                         ) {
@@ -245,9 +194,9 @@
                 }
 
 
-                // -------------------------------------------------
+                // ---------------------------------------------
                 // Start quoted field
-                // -------------------------------------------------
+                // ---------------------------------------------
 
                 if (
                     character === '"'
@@ -257,48 +206,42 @@
 
                 }
 
-                // -------------------------------------------------
+                // ---------------------------------------------
                 // Field separator
-                // -------------------------------------------------
+                // ---------------------------------------------
 
                 else if (
-                    character === ","
+                    character === ','
                 ) {
 
-                    row.push(
-                        field
-                    );
+                    row.push(field);
 
                     field = "";
                 }
 
-                // -------------------------------------------------
+                // ---------------------------------------------
                 // End of row
-                // -------------------------------------------------
+                // ---------------------------------------------
 
                 else if (
-                    character === "\n"
+                    character === '\n'
                 ) {
 
-                    row.push(
-                        field
-                    );
+                    row.push(field);
 
-                    rows.push(
-                        row
-                    );
+                    rows.push(row);
 
                     row = [];
 
                     field = "";
                 }
 
-                // -------------------------------------------------
+                // ---------------------------------------------
                 // Ignore CR
-                // -------------------------------------------------
+                // ---------------------------------------------
 
                 else if (
-                    character !== "\r"
+                    character !== '\r'
                 ) {
 
                     field += character;
@@ -306,22 +249,15 @@
             }
 
 
-            // -------------------------------------------------
             // Last row
-            // -------------------------------------------------
-
             if (
                 field.length > 0 ||
                 row.length > 0
             ) {
 
-                row.push(
-                    field
-                );
+                row.push(field);
 
-                rows.push(
-                    row
-                );
+                rows.push(row);
             }
 
 
@@ -333,8 +269,7 @@
             }
 
 
-            const headers =
-                rows[0];
+            const headers = rows[0];
 
 
             return rows
@@ -346,33 +281,28 @@
                                 value !== ""
                         )
                 )
-                .map(
-                    values => {
+                .map(values => {
 
-                        const object = {};
-
-
-                        headers.forEach(
-                            (
-                                header,
-                                index
-                            ) => {
-
-                                object[header] =
-                                    values[index] ??
-                                    "";
-                            }
-                        );
+                    const object = {};
 
 
-                        return object;
-                    }
-                );
+                    headers.forEach(
+                        (header, index) => {
+
+                            object[header] =
+                                values[index] ?? "";
+                        }
+                    );
+
+
+                    return object;
+                });
         }
 
 
         // =====================================================
         // Prepare dashboard payload
+        // Equivalent to Python _prepare_payload()
         // =====================================================
 
         preparePayload(row) {
@@ -381,14 +311,11 @@
 
 
             // -------------------------------------------------
-            // Decode CSV fields
+            // Decode every CSV field
             // -------------------------------------------------
 
             for (
-                const [
-                    key,
-                    value
-                ]
+                const [key, value]
                 of Object.entries(row)
             ) {
 
@@ -402,9 +329,7 @@
 
 
                 payload[key] =
-                    this.decodeCsvValue(
-                        value
-                    );
+                    this.decodeCsvValue(value);
             }
 
 
@@ -460,9 +385,7 @@
             ) {
 
                 const match =
-                    String(
-                        frameId
-                    ).match(
+                    String(frameId).match(
                         /(\d+)$/
                     );
 
@@ -470,9 +393,7 @@
                 if (match) {
 
                     payload.frame_idx =
-                        Number(
-                            match[1]
-                        );
+                        Number(match[1]);
                 }
             }
 
@@ -496,7 +417,7 @@
 
 
             // -------------------------------------------------
-            // Ensure all cameras exist
+            // Ensure all four cameras exist
             // -------------------------------------------------
 
             for (
@@ -505,9 +426,7 @@
             ) {
 
                 let cameraData =
-                    cameras[
-                        cameraName
-                    ];
+                    cameras[cameraName];
 
 
                 if (
@@ -530,9 +449,7 @@
                 }
 
 
-                cameras[
-                    cameraName
-                ] =
+                cameras[cameraName] =
                     cameraData;
             }
 
@@ -546,44 +463,20 @@
 
 
         // =====================================================
-        // Load one JPEG as Base64
+        // Load one camera image as an asset ready to draw.
         //
-        // The Promise itself is stored in the cache.
+        // Preferred path: fetch -> Blob -> createImageBitmap.
+        // This decodes off the main thread and can be handed straight
+        // to canvas drawImage() with no per-frame re-decode.
         //
-        // This means preload + playback share the same
-        // request instead of downloading the same image twice.
+        // Fallback path (older browsers only): fetch -> Blob ->
+        // FileReader -> base64 data URL, same as before.
         // =====================================================
 
-        async loadImageBase64(
+        async loadCameraAsset(
             cameraName,
             frameId
         ) {
-
-            const cacheKey =
-                cameraName +
-                "/" +
-                frameId;
-
-
-            // -------------------------------------------------
-            // Cache hit
-            // -------------------------------------------------
-
-            if (
-                this.imageCache.has(
-                    cacheKey
-                )
-            ) {
-
-                return this.imageCache.get(
-                    cacheKey
-                );
-            }
-
-
-            // -------------------------------------------------
-            // Image path
-            // -------------------------------------------------
 
             const imagePath =
                 this.datasetPath +
@@ -594,370 +487,405 @@
                 ".jpg";
 
 
-            // -------------------------------------------------
-            // Start network request
-            // -------------------------------------------------
-
-            const imagePromise =
-                fetch(
-                    imagePath,
-                    {
-                        cache:
-                            "force-cache"
-                    }
-                )
-                .then(
-                    response => {
-
-                        if (
-                            !response.ok
-                        ) {
-
-                            throw new Error(
-                                "Image not found: " +
-                                imagePath
-                            );
-                        }
+            const response =
+                await fetch(
+                    imagePath
+                );
 
 
-                        return response.blob();
-                    }
-                )
-                .then(
-                    blob => {
+            if (!response.ok) {
 
-                        return new Promise(
-                            (
-                                resolve,
-                                reject
-                            ) => {
-
-                                const reader =
-                                    new FileReader();
+                throw new Error(
+                    "Image not found: " +
+                    imagePath
+                );
+            }
 
 
-                                reader.onload =
-                                    () => {
-
-                                        const result =
-                                            reader.result;
+            const blob =
+                await response.blob();
 
 
-                                        const commaIndex =
-                                            result.indexOf(
-                                                ","
-                                            );
+            if (SUPPORTS_IMAGE_BITMAP) {
+
+                const bitmap =
+                    await createImageBitmap(
+                        blob
+                    );
 
 
-                                        resolve(
-                                            commaIndex >= 0
-                                                ? result.slice(
-                                                    commaIndex + 1
-                                                )
-                                                : result
-                                        );
-                                    };
+                return { bitmap };
+            }
 
 
-                                reader.onerror =
-                                    () => {
+            const dataUrl =
+                await new Promise(
+                    (resolve, reject) => {
 
-                                        reject(
-                                            reader.error ||
-                                            new Error(
-                                                "Failed to read image"
-                                            )
-                                        );
-                                    };
+                        const reader =
+                            new FileReader();
 
 
-                                reader.readAsDataURL(
-                                    blob
+                        reader.onload =
+                            function () {
+
+                                resolve(
+                                    reader.result
                                 );
-                            }
+                            };
+
+
+                        reader.onerror =
+                            function () {
+
+                                reject(
+                                    new Error(
+                                        "Failed to read image"
+                                    )
+                                );
+                            };
+
+
+                        reader.readAsDataURL(
+                            blob
                         );
                     }
                 );
 
 
-            /*
-             * Store immediately.
-             *
-             * A second caller gets the same Promise.
-             */
-            this.imageCache.set(
-                cacheKey,
-                imagePromise
-            );
+            const commaIndex =
+                dataUrl.indexOf(",");
 
 
-            try {
-
-                return await imagePromise;
-
-            } catch (error) {
-
-                /*
-                 * Remove failed requests so they
-                 * can be retried.
-                 */
-                this.imageCache.delete(
-                    cacheKey
-                );
-
-                throw error;
-            }
+            return {
+                image:
+                    commaIndex >= 0
+                        ? dataUrl.substring(commaIndex + 1)
+                        : dataUrl
+            };
         }
 
 
         // =====================================================
-        // Load all four camera images
+        // Load all four camera assets for one frame
         // =====================================================
 
-        async prepareImages(
-            payload
-        ) {
+        async loadFrameAssets(frameId) {
 
-            const frameId =
-                payload.frame_id;
+            const entries =
+                await Promise.all(
 
-
-            await Promise.all(
-
-                CAMERA_NAMES.map(
-                    async cameraName => {
-
-                        payload
-                            .cameras
-                            [cameraName]
-                            .image =
-
-                            await this.loadImageBase64(
+                    CAMERA_NAMES.map(
+                        async cameraName => [
+                            cameraName,
+                            await this.loadCameraAsset(
                                 cameraName,
                                 frameId
-                            );
-                    }
-                )
-            );
+                            )
+                        ]
+                    )
+                );
 
 
-            return payload;
+            const assets = {};
+
+            for (
+                const [name, asset]
+                of entries
+            ) {
+
+                assets[name] = asset;
+            }
+
+
+            return assets;
         }
 
 
         // =====================================================
-        // Preload future frames
-        //
-        // This is background work.
-        // Playback does NOT wait for the entire preload.
+        // Cache helpers
         // =====================================================
 
-        async preloadFrames(
-            startIndex
-        ) {
+        // Cheaply derive a frame's id from its row without running full
+        // preparePayload() -- used by the prefetcher to know what to
+        // fetch next.
+        peekFrameId(index) {
+
+            const row =
+                this.rows[index];
+
+
+            if (!row) return null;
+
+
+            let frameId =
+                this.decodeCsvValue(
+                    row.frame_id
+                );
+
+
+            if (!frameId) {
+
+                const frameIdx =
+                    this.decodeCsvValue(
+                        row.frame_idx
+                    );
+
+
+                if (
+                    frameIdx === undefined ||
+                    frameIdx === null ||
+                    frameIdx === ""
+                ) {
+
+                    return null;
+                }
+
+
+                frameId =
+                    "frame_" +
+                    String(
+                        Number(frameIdx)
+                    ).padStart(6, "0");
+            }
+
+
+            return frameId;
+        }
+
+
+        // Release an entry's decoded bitmaps and drop it from the cache.
+        evictFrame(frameId) {
+
+            const assets =
+                this.imageCache.get(
+                    frameId
+                );
+
+
+            this.imageCache.delete(
+                frameId
+            );
+
 
             if (
-                !this.totalFrames
+                !assets ||
+                assets === "pending"
             ) {
 
                 return;
             }
 
 
-            const endIndex =
-                Math.min(
-                    startIndex +
-                    this.preloadAhead,
+            for (
+                const cameraName
+                of CAMERA_NAMES
+            ) {
 
-                    this.totalFrames
-                );
+                const asset =
+                    assets[cameraName];
 
 
-            const jobs = [];
+                if (
+                    asset &&
+                    asset.bitmap &&
+                    typeof asset.bitmap.close
+                        === "function"
+                ) {
+
+                    asset.bitmap.close();
+                }
+            }
+        }
+
+
+        // Trim the cache down to cacheMax, never evicting anything in
+        // `keepFrameIds` (the current prefetch window).
+        pruneCache(keepFrameIds) {
+
+            if (
+                this.imageCache.size
+                <= this.cacheMax
+            ) {
+
+                return;
+            }
 
 
             for (
-                let index = startIndex;
-                index < endIndex;
-                index++
+                const frameId
+                of this.imageCache.keys()
             ) {
 
-                /*
-                 * Don't schedule the same frame repeatedly.
-                 */
                 if (
-                    this.preloadingIndexes.has(
-                        index
-                    )
+                    this.imageCache.size
+                    <= this.cacheMax
+                ) {
+
+                    break;
+                }
+
+
+                if (
+                    keepFrameIds.has(frameId)
                 ) {
 
                     continue;
                 }
 
 
-                this.preloadingIndexes.add(
-                    index
-                );
-
-
-                try {
-
-                    const payload =
-                        this.preparePayload(
-                            this.rows[
-                                index
-                            ]
-                        );
-
-
-                    const frameId =
-                        payload.frame_id;
-
-
-                    // -----------------------------------------
-                    // Four cameras
-                    // -----------------------------------------
-
-                    for (
-                        const cameraName
-                        of CAMERA_NAMES
-                    ) {
-
-                        jobs.push(
-                            this.loadImageBase64(
-                                cameraName,
-                                frameId
-                            )
-                        );
-                    }
-
-                } catch (error) {
-
-                    console.warn(
-                        "[PerceptionReplay] " +
-                        "Preload preparation failed:",
-                        error
-                    );
-                }
-            }
-
-
-            if (
-                jobs.length > 0
-            ) {
-
-                /*
-                 * Don't await from the replay loop.
-                 */
-                Promise.allSettled(
-                    jobs
-                );
+                this.evictFrame(frameId);
             }
         }
 
 
         // =====================================================
-        // Rolling cache cleanup
+        // Background prefetcher
         //
-        // Keeps:
-        //
-        //   current - 5
-        //   through
-        //   current + 40
-        //
-        // Everything else is removed from our JS cache.
+        // Keeps a rolling window of `prefetchAhead` frames (relative to
+        // the current playhead, wrapping at the end of the dataset)
+        // decoded and ready in this.imageCache. Runs concurrently with
+        // the playback loop so publishFrame() essentially never has to
+        // wait on the network once the window has filled in.
         // =====================================================
 
-        cleanupCache(
-            currentIndex
-        ) {
+        async runPrefetcher() {
 
-            const minIndex =
-                Math.max(
-                    0,
-                    currentIndex -
-                    this.cacheBehind
-                );
+            if (this.prefetchRunning) return;
+
+            this.prefetchRunning = true;
 
 
-            const maxIndex =
-                Math.min(
-                    this.totalFrames - 1,
-                    currentIndex +
-                    this.preloadAhead
-                );
-
-
-            // -------------------------------------------------
-            // Remove old image cache entries
-            // -------------------------------------------------
-
-            for (
-                const key
-                of this.imageCache.keys()
+            while (
+                this.running &&
+                this.totalFrames > 0
             ) {
 
-                const match =
-                    key.match(
-                        /\/frame_(\d+)$/
-                    );
+                const keep = new Set();
 
 
-                if (!match) {
-                    continue;
-                }
-
-
-                const frameNumber =
-                    Number(
-                        match[1]
-                    );
-
-
-                /*
-                 * frame_000001 corresponds
-                 * to array index 0.
-                 */
-                const frameIndex =
-                    frameNumber - 1;
-
-
-                if (
-                    frameIndex < minIndex ||
-                    frameIndex > maxIndex
+                for (
+                    let offset = 0;
+                    offset < this.prefetchAhead;
+                    offset++
                 ) {
 
-                    this.imageCache.delete(
-                        key
+                    if (!this.running) break;
+
+
+                    const idx =
+                        (this.rowIndex + offset)
+                        % this.totalFrames;
+
+
+                    const frameId =
+                        this.peekFrameId(idx);
+
+
+                    if (!frameId) continue;
+
+
+                    keep.add(frameId);
+
+
+                    if (
+                        this.imageCache.has(
+                            frameId
+                        )
+                    ) {
+
+                        continue;
+                    }
+
+
+                    this.imageCache.set(
+                        frameId,
+                        "pending"
                     );
+
+
+                    try {
+
+                        const assets =
+                            await this.loadFrameAssets(
+                                frameId
+                            );
+
+
+                        if (!this.running) {
+
+                            // Replay was stopped mid-fetch: release
+                            // what we just decoded instead of caching it.
+                            for (
+                                const cameraName
+                                of CAMERA_NAMES
+                            ) {
+
+                                const a =
+                                    assets[cameraName];
+
+
+                                if (
+                                    a &&
+                                    a.bitmap &&
+                                    typeof a.bitmap.close
+                                        === "function"
+                                ) {
+
+                                    a.bitmap.close();
+                                }
+                            }
+
+
+                            this.imageCache.delete(
+                                frameId
+                            );
+
+                            break;
+                        }
+
+
+                        this.imageCache.set(
+                            frameId,
+                            assets
+                        );
+
+                    } catch (error) {
+
+                        this.imageCache.delete(
+                            frameId
+                        );
+
+
+                        console.warn(
+                            "[PerceptionReplay] " +
+                            "Prefetch failed for " +
+                            frameId,
+                            error
+                        );
+                    }
                 }
+
+
+                this.pruneCache(keep);
+
+
+                // Yield briefly once the window is filled so this loop
+                // doesn't spin; it wakes up again as soon as rowIndex
+                // advances and there's new work to do.
+                await new Promise(
+                    resolve => setTimeout(resolve, 16)
+                );
             }
 
 
-            // -------------------------------------------------
-            // Keep preload bookkeeping bounded too
-            // -------------------------------------------------
-
-            for (
-                const index
-                of this.preloadingIndexes
-            ) {
-
-                if (
-                    index < minIndex ||
-                    index > maxIndex
-                ) {
-
-                    this.preloadingIndexes.delete(
-                        index
-                    );
-                }
-            }
+            this.prefetchRunning = false;
         }
 
 
         // =====================================================
         // Load CSV
+        // Equivalent to _get_total_frames()
         // =====================================================
 
         async loadCsv() {
@@ -972,15 +900,12 @@
                 await fetch(
                     this.csvPath,
                     {
-                        cache:
-                            "no-store"
+                        cache: "no-store"
                     }
                 );
 
 
-            if (
-                !response.ok
-            ) {
+            if (!response.ok) {
 
                 throw new Error(
                     "CSV not found: " +
@@ -1036,10 +961,6 @@
             }
 
 
-            // -------------------------------------------------
-            // Current row
-            // -------------------------------------------------
-
             const row =
                 this.rows[
                     this.rowIndex
@@ -1057,19 +978,55 @@
 
 
             // -------------------------------------------------
-            // Get four images
-            //
-            // Usually cache hits after preloading starts.
+            // Grab this frame's camera images from the prefetch
+            // cache (should already be warm); fall back to a
+            // direct load on a cache miss so playback never
+            // deadlocks (e.g. the very first frame, before the
+            // prefetcher has had a chance to run).
             // -------------------------------------------------
 
-            payload =
-                await this.prepareImages(
-                    payload
+            const frameId =
+                payload.frame_id;
+
+
+            let assets =
+                this.imageCache.get(
+                    frameId
                 );
 
 
+            if (
+                !assets ||
+                assets === "pending"
+            ) {
+
+                assets =
+                    await this.loadFrameAssets(
+                        frameId
+                    );
+
+
+                this.imageCache.set(
+                    frameId,
+                    assets
+                );
+            }
+
+
+            for (
+                const cameraName
+                of CAMERA_NAMES
+            ) {
+
+                Object.assign(
+                    payload.cameras[cameraName],
+                    assets[cameraName]
+                );
+            }
+
+
             // -------------------------------------------------
-            // Reset trajectory at beginning of replay
+            // Reset trajectory at start of replay
             // -------------------------------------------------
 
             if (
@@ -1082,17 +1039,17 @@
 
 
             // -------------------------------------------------
-            // Send to existing dashboard
+            // Push to existing dashboard
             // -------------------------------------------------
 
             if (
-                typeof window.updateDashboard !==
-                "function"
+                typeof window.updateDashboard
+                !== "function"
             ) {
 
                 throw new Error(
                     "updateDashboard() " +
-                    "was not found."
+                    "was not found in dashboard."
                 );
             }
 
@@ -1110,7 +1067,7 @@
 
 
             // -------------------------------------------------
-            // Progress logging
+            // Progress
             // -------------------------------------------------
 
             if (
@@ -1132,34 +1089,10 @@
 
 
             // -------------------------------------------------
-            // Move forward
+            // Next CSV row
             // -------------------------------------------------
 
             this.rowIndex++;
-
-
-            // -------------------------------------------------
-            // Rolling cache cleanup
-            // -------------------------------------------------
-
-            this.cleanupCache(
-                this.rowIndex
-            );
-
-
-            // -------------------------------------------------
-            // Start next preload window
-            // -------------------------------------------------
-
-            if (
-                this.rowIndex <
-                this.totalFrames
-            ) {
-
-                this.preloadFrames(
-                    this.rowIndex
-                );
-            }
 
 
             // -------------------------------------------------
@@ -1179,41 +1112,16 @@
                 );
 
 
-                /*
-                 * Restart.
-                 */
-                this.rowIndex =
-                    0;
+                // Restart from frame 1
+                this.rowIndex = 0;
 
-                this.frameCount =
-                    0;
-
-
-                /*
-                 * Reset the rolling cache around
-                 * the beginning of the dataset.
-                 */
-                this.cleanupCache(
-                    0
-                );
-
-
-                /*
-                 * Allow the first frames to be
-                 * preloaded again.
-                 */
-                this.preloadingIndexes.clear();
-
-
-                this.preloadFrames(
-                    0
-                );
+                this.frameCount = 0;
             }
         }
 
 
         // =====================================================
-        // Start replay
+        // Start continuous replay
         // =====================================================
 
         async replay() {
@@ -1226,8 +1134,7 @@
             }
 
 
-            this.running =
-                true;
+            this.running = true;
 
 
             console.log(
@@ -1243,26 +1150,6 @@
             );
 
 
-            console.log(
-                "[PerceptionReplay] " +
-                "Preload ahead: " +
-                this.preloadAhead +
-                " frames"
-            );
-
-
-            console.log(
-                "[PerceptionReplay] " +
-                "Cache behind: " +
-                this.cacheBehind +
-                " frames"
-            );
-
-
-            // -------------------------------------------------
-            // Load CSV
-            // -------------------------------------------------
-
             await this.loadCsv();
 
 
@@ -1270,20 +1157,22 @@
             // Reset replay state
             // -------------------------------------------------
 
-            this.rowIndex =
-                0;
+            this.rowIndex = 0;
 
-            this.frameCount =
-                0;
-
-
-            this.imageCache.clear();
-
-            this.preloadingIndexes.clear();
+            this.frameCount = 0;
 
 
             // -------------------------------------------------
-            // Inform dashboard
+            // Start background prefetching. Runs concurrently with
+            // the playback loop below so image decoding happens
+            // ahead of when each frame is actually needed.
+            // -------------------------------------------------
+
+            this.runPrefetcher();
+
+
+            // -------------------------------------------------
+            // Tell dashboard total frame count
             // -------------------------------------------------
 
             if (
@@ -1293,30 +1182,13 @@
 
                 window.updateDashboard({
 
-                    trajectory_reset:
-                        true,
+                    trajectory_reset: true,
 
                     replay_total_frames:
                         this.totalFrames
                 });
             }
 
-
-            // -------------------------------------------------
-            // Start background preload
-            //
-            // IMPORTANT:
-            // Do not await it.
-            // -------------------------------------------------
-
-            this.preloadFrames(
-                0
-            );
-
-
-            // -------------------------------------------------
-            // FPS timing
-            // -------------------------------------------------
 
             const framePeriod =
                 this.targetFps > 0
@@ -1370,10 +1242,7 @@
                     }
 
 
-                    // -------------------------------------------------
-                    // Maximum-speed mode
-                    // -------------------------------------------------
-
+                    // Maximum speed
                     if (
                         framePeriod <= 0
                     ) {
@@ -1435,6 +1304,7 @@
                     this.timer
                 );
 
+
                 this.timer =
                     null;
             }
@@ -1449,7 +1319,7 @@
 
 
     // =========================================================
-    // Expose globally
+    // Make class accessible globally
     // =========================================================
 
     window.PerceptionReplay =
@@ -1457,12 +1327,12 @@
 
 
     // =========================================================
-    // Automatic startup
+    // Automatically start when dashboard loads
     // =========================================================
 
     window.addEventListener(
         "load",
-        () => {
+        function () {
 
             const replay =
                 new PerceptionReplay();
