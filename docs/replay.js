@@ -40,11 +40,11 @@
     //
     // At 10 FPS:
     // 20 frames = 2 seconds of camera buffer.
-    const ROLLING_WINDOW_FRAMES = 20;
+    const ROLLING_WINDOW_FRAMES = 100;
 
     // Number of frames loaded simultaneously.
     // Keep this modest to avoid browser/network bursts.
-    const FRAME_LOAD_CONCURRENCY = 2;
+    const FRAME_LOAD_CONCURRENCY = 4;
 
 
     // =========================================================
