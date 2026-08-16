@@ -40,14 +40,6 @@
   .hero canvas{position:absolute; inset:0; width:100%; height:100%;}
   .hero-tag{position:absolute; top:10px; left:12px; font-size:11px; font-family:'IBM Plex Mono',monospace; color:var(--text2); background:rgba(18,21,26,0.65); padding:3px 8px; border-radius:3px; z-index:3;}
 
-  /* camera loading spinner */
-  .cam-loading{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:8px; background:#20252d; z-index:2; transition:opacity 0.4s ease; pointer-events:none;}
-  .cam-loading.hidden{opacity:0; pointer-events:none;}
-  .cam-spinner{width:22px; height:22px; border-radius:50%; border:2px solid rgba(77,238,220,0.18); border-top-color:var(--cyan); animation:cam-spin 0.8s linear infinite;}
-  .thumbs .cam-spinner{width:16px; height:16px; border-width:2px;}
-  .cam-loading-label{font-size:9px; font-family:'IBM Plex Mono',monospace; color:var(--text3); text-transform:uppercase; letter-spacing:0.5px;}
-  @keyframes cam-spin{ to{ transform:rotate(360deg); } }
-
   /* row 3: thumbnails */
   .thumbs{grid-template-columns:1fr 1fr 1fr;}
   /* .thumbs .cell{padding:0; position:relative; height:110px;} */
@@ -168,7 +160,7 @@
   </div>
   <div class="banner-author">
     <div class="banner-name">Hamza Zafar</div>
-    <div class="banner-links"><a href="https://www.linkedin.com/in/hamza-zafar/">LinkedIn</a><a href="https://github.com/hamzafar">Github</a></div>
+    <div class="banner-links"><a href="#">LinkedIn</a><a href="#">Github</a></div>
   </div>
 </div>
 
@@ -209,13 +201,13 @@
   </div>
 
   <div class="row hero">
-    <div class="cell"><span class="hero-tag">FRONT — HERO</span><canvas id="cam-hero"></canvas><div class="cam-loading" id="cam-hero-loading"><div class="cam-spinner"></div><span class="cam-loading-label">Connecting…</span></div></div>
+    <div class="cell"><span class="hero-tag">FRONT — HERO</span><canvas id="cam-hero"></canvas></div>
   </div>
 
   <div class="row thumbs">
-    <div class="cell"><span class="thumb-tag">LEFT</span><canvas id="cam-left"></canvas><div class="cam-loading" id="cam-left-loading"><div class="cam-spinner"></div></div></div>
-    <div class="cell"><span class="thumb-tag">REAR</span><canvas id="cam-rear"></canvas><div class="cam-loading" id="cam-rear-loading"><div class="cam-spinner"></div></div></div>
-    <div class="cell"><span class="thumb-tag">RIGHT</span><canvas id="cam-right"></canvas><div class="cam-loading" id="cam-right-loading"><div class="cam-spinner"></div></div></div>
+    <div class="cell"><span class="thumb-tag">LEFT</span><canvas id="cam-left"></canvas></div>
+    <div class="cell"><span class="thumb-tag">REAR</span><canvas id="cam-rear"></canvas></div>
+    <div class="cell"><span class="thumb-tag">RIGHT</span><canvas id="cam-right"></canvas></div>
   </div>
 
   <div class="row cockpit">
@@ -577,11 +569,6 @@ const sceneVariants={
 const camIdMap = { front:'cam-hero', left:'cam-left', rear:'cam-rear', right:'cam-right' };
 
 
-function hideCamLoading(id){
-  const el = document.getElementById(id + '-loading');
-  if (el && !el.classList.contains('hidden')) el.classList.add('hidden');
-}
-
 function drawCam(id, cameraData, big) {
   const canvas = document.getElementById(id);
   const parent = canvas.parentElement;
@@ -605,7 +592,6 @@ function drawCam(id, cameraData, big) {
     // (via createImageBitmap), so this is a direct, synchronous draw —
     // no per-frame base64 decode, no new Image() allocation.
     drawFrameImage(ctx, canvas, cameraData.bitmap, cameraData.boxes, big);
-    hideCamLoading(id);
 
   } else if (cameraData.image) {
 
@@ -614,7 +600,6 @@ function drawCam(id, cameraData, big) {
     const img = new Image();
     img.onload = function () {
       drawFrameImage(ctx, canvas, img, cameraData.boxes, big);
-      hideCamLoading(id);
     };
     img.src = 'data:image/jpeg;base64,' + cameraData.image;
 
