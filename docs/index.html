@@ -99,6 +99,18 @@
   .banner-links{font-size:12px; font-family:'IBM Plex Mono',monospace; margin-top:3px; display:flex; gap:10px; justify-content:flex-end;}
   .banner-links a{color:#2dd4a7; text-decoration:none;}
   .banner-links a:hover{text-decoration:underline;}
+
+  /* phases section */
+  .phases{max-width:1180px; margin:24px auto 0;}
+  .phases-header{display:flex; justify-content:space-between; align-items:flex-end; gap:24px; flex-wrap:wrap; margin-bottom:18px;}
+  .phases-title{font-size:28px; font-weight:600; line-height:1.2; color:var(--text);}
+  .phases-sub{font-size:13px; color:var(--text2); max-width:360px; line-height:1.5;}
+  .phase-card{display:flex; align-items:center; gap:20px; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:16px 20px; margin-bottom:10px;}
+  .phase-num{font-family:'IBM Plex Mono',monospace; font-size:13px; color:var(--green); width:40px; flex-shrink:0;}
+  .phase-body{flex:1;}
+  .phase-name{font-size:15px; font-weight:600; color:var(--text); margin-bottom:4px;}
+  .phase-desc{font-size:13px; color:var(--text2); line-height:1.5;}
+  .phase-tag{font-family:'IBM Plex Mono',monospace; font-size:10px; text-transform:uppercase; letter-spacing:0.6px; color:var(--text3); flex-shrink:0;}
 </style>
 </head>
 <body>
@@ -221,6 +233,76 @@
     </div>
   </div>
 
+</div>
+
+<div class="phases">
+  <div class="phases-header">
+    <div class="phases-title">From pixels →<br>world</div>
+    <div class="phases-sub">The 12 phases are evidence of one connected perception system rather than twelve unrelated projects.</div>
+  </div>
+
+  <div class="phase-card">
+    <div class="phase-num">01–03</div>
+    <div class="phase-body">
+      <div class="phase-name">Foundation</div>
+      <div class="phase-desc">CARLA + ROS2 integration, YOLO detection and modular ROS2 architecture.</div>
+    </div>
+    <div class="phase-tag">System</div>
+  </div>
+
+  <div class="phase-card">
+    <div class="phase-num">04–06</div>
+    <div class="phase-body">
+      <div class="phase-name">Performance engineering</div>
+      <div class="phase-desc">Deterministic replay, DDS transport investigation, TensorRT optimization and profiling.</div>
+    </div>
+    <div class="phase-tag">26 FPS</div>
+  </div>
+
+  <div class="phase-card">
+    <div class="phase-num">07</div>
+    <div class="phase-body">
+      <div class="phase-name">Camera–LiDAR perception</div>
+      <div class="phase-desc">Projection, segmentation-mask association, point-cloud filtering and distance estimation.</div>
+    </div>
+    <div class="phase-tag">3D</div>
+  </div>
+
+  <div class="phase-card">
+    <div class="phase-num">08–09</div>
+    <div class="phase-body">
+      <div class="phase-name">360° spatial perception</div>
+      <div class="phase-desc">Four cameras, ego coordinates, BEV and Hungarian cross-camera association.</div>
+    </div>
+    <div class="phase-tag">360°</div>
+  </div>
+
+  <div class="phase-card">
+    <div class="phase-num">10</div>
+    <div class="phase-body">
+      <div class="phase-name">Temporal perception</div>
+      <div class="phase-desc">ByteTrack plus AB3DMOT for persistent 2D/3D object tracking.</div>
+    </div>
+    <div class="phase-tag">Tracking</div>
+  </div>
+
+  <div class="phase-card">
+    <div class="phase-num">11</div>
+    <div class="phase-body">
+      <div class="phase-name">Dynamic perception</div>
+      <div class="phase-desc">GNSS/IMU ego motion and radar-based surrounding-object motion estimation.</div>
+    </div>
+    <div class="phase-tag">Motion</div>
+  </div>
+
+  <div class="phase-card">
+    <div class="phase-num">12</div>
+    <div class="phase-body">
+      <div class="phase-name">Unified perception system</div>
+      <div class="phase-desc">World objects, nearest-object reasoning, BEV, replay and live telemetry dashboard.</div>
+    </div>
+    <div class="phase-tag">Integration</div>
+  </div>
 </div>
 
 <script>
